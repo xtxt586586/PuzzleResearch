@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Frontend
+web/node_modules/
+web/.next/
+web/out/
+
+# Local databases and data
+data/
+storage/
+chroma/
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated files
+generated/
+exports/
+screenshots/
+reports/
+
+# OS
+.DS_Store
+Thumbs.db
