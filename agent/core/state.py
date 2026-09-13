@@ -42,11 +42,11 @@ def capped_add_messages(
         return merged
 
     keep_first = max(
-        int(getattr(settings, "keep_first_messages", 1)),
+        int(getattr(settings, "trim_messages_keep_first", 1)),
         0,
     )
     keep_last = max(
-        int(getattr(settings, "keep_last_messages", 8)),
+        int(getattr(settings, "trim_messages_keep_last", 8)),
         0,
     )
 
