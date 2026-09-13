@@ -42,11 +42,11 @@ def capped_add_messages(
         return merged
 
     keep_first = max(
-        int(getattr(settings,"keep_first_messages",1)),
+        int(getattr(settings, "keep_first_messages", 1)),
         0,
     )
     keep_last = max(
-        int(getattr(settings,"keep_last_messages",8)),
+        int(getattr(settings, "keep_last_messages", 8)),
         0,
     )
 
@@ -110,7 +110,7 @@ class AgentState(TypedDict,total=False):
     is_complete: bool
 
     started_at: str
-    ended_ad: str
+    ended_at: str
 
     # ========== 路由信息 ==========
 
@@ -151,7 +151,7 @@ class AgentState(TypedDict,total=False):
 
     quality_overall_score: float
     quality_gap_count: int
-    citation_coverge_score: float
+    citation_coverage_score: float
     quality_summary: Dict[str,Any]
     claim_verifier_counts: Dict[str,Any]
 
@@ -196,7 +196,7 @@ class AgentState(TypedDict,total=False):
 
     # ========== 子 Agent 上下文 ==========
 
-    sub_agent_context: Dict[str,Dict[str,Any]]
+    sub_agent_contexts: Dict[str,Dict[str,Any]]
 
     # ========== Token 统计 ==========
 

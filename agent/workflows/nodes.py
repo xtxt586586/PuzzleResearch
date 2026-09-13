@@ -98,7 +98,7 @@ def direct_answer_node(
 
     return {
         "draft_report": answer,
-        "final_answer": answer,
+        "final_report": answer,
         "messages": [
             AIMessage(content=answer)
         ],

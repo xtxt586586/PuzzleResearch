@@ -146,7 +146,7 @@ class Settings(BaseSettings):
 
 
 @lru_cache
-def get_setting() -> Settings:
+def get_settings() -> Settings:
     """
     创建全局配置对象。
 
