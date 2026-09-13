@@ -7,6 +7,7 @@ from agent.workflows.nodes import (
     direct_answer_node,
     finalize_node,
     router_node,
+    clarify_node,
 )
 
 
@@ -32,13 +33,21 @@ def create_research_graph():
     workflow.add_node("router",router_node)
     workflow.add_node("direct_answer",direct_answer_node)
     workflow.add_node("finalize",finalize_node)
+    workflow.add_node("clarify",clarify_node)
 
     #设置入口节点
     workflow.set_entry_point("router")
 
     def route_decision(state: AgentState) -> str:
         """
-        根据路由节点写入的 route 字段选择下一个节点。
+        根据 Router 写入的 route 字段选择下一个节点。
+
+        当前阶段只实现两条实际路径：
+
+        - clarify → clarify
+        - 其他合法路径 → direct_answer
+
+        web、agent、deep 后续再分别接入真实节点。
         """
 
         route = state.get("route", "clarify")
@@ -54,6 +63,9 @@ def create_research_graph():
         if route not in allowed_routes:
             return "clarify"
 
+        if route == "clarify":
+            return "clarify"
+
         # 当前阶段所有路径都进入 direct_answer。
         # 后续会把 agent/web/deep 替换成真正的节点。
         return "direct_answer"
@@ -64,11 +76,13 @@ def create_research_graph():
         route_decision,
         {
             "direct_answer": "direct_answer",
+            "clarify": "clarify",
         },
     )
 
     #添加普通边
     workflow.add_edge("direct_answer","finalize")
+    workflow.add_edge("clarify","finalize")
     workflow.add_edge("finalize",END)
 
     return workflow.compile()

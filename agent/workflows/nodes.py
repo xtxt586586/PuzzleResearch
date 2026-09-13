@@ -55,6 +55,89 @@ def router_node(
     return result
 
 
+def clarify_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str, Any]:
+    """
+    澄清节点。
+
+    当 Router 判断用户请求信息不足时，
+    生成一个简洁的澄清问题。
+
+    当前阶段：
+    - 生成澄清问题；
+    - 将问题返回给用户；
+    - 结束本次图执行。
+
+    后续阶段会通过 interrupt 和 thread resume
+    支持用户回答后继续执行原任务。
+    """
+
+    user_input = state.get("input","").strip()
+
+    #空输入不需要再次调用模型，直接返回固定问题。
+    if not user_input:
+        question = "请告诉我你希望完成什么任务？"
+
+        return {
+            "clarification_question": question,
+            "draft_report": question,
+            "final_report": question,
+            "messages": [
+                AIMessage(content=question),
+            ],
+            "is_complete": False,
+            "status": "running",
+        }
+
+    llm = ModelFactory.for_task(
+        "clarification",
+        temperature=0.0,
+    )
+
+    messages = [
+        SystemMessage(
+            content=(
+                "你是 PuzzleResearch 的澄清助手。"
+                "用户的请求信息不足，无法直接执行。"
+                "请根据用户原始请求提出一个简洁、具体的问题，"
+                "帮助用户补充任务目标、对象或必要条件。"
+                "只输出一个问题，不要解释原因。"
+            )
+        ),
+        HumanMessage(
+            content=f"用户原始提问：\n{user_input}"
+        ),
+    ]
+
+    try:
+        response = llm.invoke(
+            messages,
+            config=config,
+        )
+
+        question = _extract_response_text(response).strip()
+
+    except Exception as exc:
+        print(f"{clarify_node}澄清问题生成失败： {exc}")
+        question = "请补充说明你希望处理的具体内容和目标。"
+
+    if not question:
+        question = "请补充说明你希望处理的具体内容和目标。"
+
+    return {
+        "clarification_question": question,
+        "draft_report": question,
+        "final_report": question,
+        "messages": [
+            AIMessage(content=question),
+        ],
+        "is_complete": False,
+        "status": "running",
+    }
+
+
 def direct_answer_node(
     state: AgentState,
     config: RunnableConfig,
