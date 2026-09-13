@@ -59,7 +59,7 @@ def capped_add_messages(
         return []
 
     head = merged[:keep_first] if keep_first else []
-    tail = merged[:keep_last] if keep_last else []
+    tail = merged[-keep_last:] if keep_last else []
 
     return head + tail
 
