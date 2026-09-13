@@ -196,7 +196,7 @@ class SmartRouter:
                         config=config,
                     )
 
-                return self._normallize_decision(response)
+                return self._normalize_decision(response)
 
             except Exception as structured_error:
                 print(
