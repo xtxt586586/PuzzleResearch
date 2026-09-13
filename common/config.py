@@ -44,6 +44,22 @@ class Settings(BaseSettings):
 
     model_timeout: int = 60
 
+    # ========== 消息上下文管理 ==========
+
+    trim_messages: bool = True
+
+    # 保留最前面的消息，通常用于保留系统消息
+    trim_messages_keep_first: int = 1
+
+    # 保留最后面的消息，通常用于保存最近绘画
+    trim_messages_keep_last: int = 8
+
+    #当前阶段不启用中间消息摘要
+    summary_messages: bool = False
+
+    #未来启用摘要时，达到该数量触发
+    summary_messages_trigger: int = 20
+
     # ========== 搜索服务配置 ==========
 
     tavily_api_key: str = ""
