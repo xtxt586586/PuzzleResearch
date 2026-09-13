@@ -7,9 +7,10 @@ from langchain_core.runnables import RunnableConfig
 
 from agent.core.model_factory import ModelFactory
 from agent.core.state import AgentState
+from agent.core.smart_router import smart_route
 
 
-def _extracr_response_text(response: Any) -> str:
+def _extract_response_text(response: Any) -> str:
     """
     从模型响应中提取文本。
 
@@ -27,10 +28,37 @@ def _extracr_response_text(response: Any) -> str:
     return str(response)
 
 
+def router_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str, Any]:
+    """
+    路由节点。
+
+    读取用户问题，调用 SmartRouter，
+    把路由结果写入共享 AgentState。
+    """
+
+    user_input = state.get("input","").strip()
+
+    result = smart_route(
+        user_input,
+        config=config,
+    )
+
+    print(
+        "[route_node]",
+        f"route={result['route']}",
+        f"confidence={result['routing_confidence']:.2f}"
+    )
+
+    return result
+
+
 def direct_answer_node(
-        state: AgentState,
-        config: RunnableConfig | None = None,
-) -> Dict[str,Any]:
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str, Any]:
     """
     直接回答节点。
 
@@ -58,12 +86,12 @@ def direct_answer_node(
         HumanMessage(content=user_input),
     ]
 
-    if config is None:
-        response = llm.invoke(messages)
-    else:
-        response = llm.invoke(messages,config=config)
+    response = llm.invoke(
+        messages,
+        config=config,
+    )
 
-    answer = _extracr_response_text(response).strip()
+    answer = _extract_response_text(response).strip()
 
     if not answer:
         raise ValueError("模型返回了空回答")
@@ -80,9 +108,8 @@ def direct_answer_node(
 
 
 def finalize_node(
-        state: AgentState,
-        config: RunnableConfig | None = None,
-) -> Dict[str,Any]:
+    state: AgentState,
+) -> Dict[str, Any]:
     """
     结束节点。
 
