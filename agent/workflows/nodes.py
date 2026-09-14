@@ -267,7 +267,7 @@ def web_plan_node(
         "research_plan": queries,
         "revision_count": 0,
         "max_revisions": max(
-            int(getattr(settings,"web_max_revisions",2)),
+            int(getattr(settings,"max_revisions",2)),
             0,
         ),
         "current_step": 1,
@@ -685,73 +685,73 @@ def revise_node(
             f"内容：{excerpt}\n"
         )
 
-        source_context = "\n\n".join(context_blocks)
+    source_context = "\n\n".join(context_blocks)
 
-        missing_topic_text = "\n".join(
-            f"- {str(topic).strip()}"
-            for topic in missing_topics
-            if str(topic).strip()
-        )
+    missing_topic_text = "\n".join(
+        f"- {str(topic).strip()}"
+        for topic in missing_topics
+        if str(topic).strip()
+    )
 
-        llm = ModelFactory.for_task(
-            "writing",
-            temperature=0.3,
-        )
+    llm = ModelFactory.for_task(
+        "writing",
+        temperature=0.3,
+    )
 
-        messages = [
-            SystemMessage(
-                content=(
-                    "你是 PuzzleResearch 的报告修订 Agent。"
-                    "请根据评估意见修订原始报告。"
-                    "保留原报告中正确的内容，"
-                    "补充缺失主题，修正不准确的表述。"
-                    "只能使用提供的搜索来源，不能编造事实。"
-                    "引用来源时使用 [来源1]、[来源2] 格式。"
-                    "请直接返回修订后的完整报告正文。"
-                    "不要输出修订说明。"
-                    "不要单独添加参考来源列表，程序会自动追加。"
-                )
-            ),
-            HumanMessage(
-                content=(
-                    f"用户问题：\n{user_input}\n\n"
-                    f"原始报告：\n{report}\n\n"
-                    f"评估指出的遗漏主题：\n"
-                    f"{missing_topic_text or '无明确遗漏主题'}\n\n"
-                    f"搜索来源：\n{source_context}"
-                )
-            ),
-        ]
+    messages = [
+        SystemMessage(
+            content=(
+                "你是 PuzzleResearch 的报告修订 Agent。"
+                "请根据评估意见修订原始报告。"
+                "保留原报告中正确的内容，"
+                "补充缺失主题，修正不准确的表述。"
+                "只能使用提供的搜索来源，不能编造事实。"
+                "引用来源时使用 [来源1]、[来源2] 格式。"
+                "请直接返回修订后的完整报告正文。"
+                "不要输出修订说明。"
+                "不要单独添加参考来源列表，程序会自动追加。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"用户问题：\n{user_input}\n\n"
+                f"原始报告：\n{report}\n\n"
+                f"评估指出的遗漏主题：\n"
+                f"{missing_topic_text or '无明确遗漏主题'}\n\n"
+                f"搜索来源：\n{source_context}"
+            )
+        ),
+    ]
 
-        response = llm.invoke(
-            messages,
-            config=config,
-        )
+    response = llm.invoke(
+        messages,
+        config=config,
+    )
 
-        revised_report = _extract_response_text(
-            response
-        ).strip()
+    revised_report = _extract_response_text(
+        response
+    ).strip()
 
-        if not revised_report:
-            raise ValueError("Revision Agent 返回了空报告")
+    if not revised_report:
+        raise ValueError("Revision Agent 返回了空报告")
 
-        revised_report = _append_source_references(
-            revised_report,
-            search_results,
-        )
+    revised_report = _append_source_references(
+        revised_report,
+        search_results,
+    )
 
-        print(
-            "[revise_node]",
-            f"revision_count={revision_count}",
-            f"missing_topics={missing_topics}",
-        )
+    print(
+        "[revise_node]",
+        f"revision_count={revision_count}",
+        f"missing_topics={missing_topics}",
+    )
 
-        return {
-            "draft_report": revised_report,
-            "final_report": revised_report,
-            "revision_count": revision_count,
-            "status": "running",
-        }
+    return {
+        "draft_report": revised_report,
+        "final_report": revised_report,
+        "revision_count": revision_count,
+        "status": "running",
+    }
 
 
 def clarify_node(
