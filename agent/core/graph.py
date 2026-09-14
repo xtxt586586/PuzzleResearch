@@ -12,6 +12,7 @@ from agent.workflows.nodes import (
     web_plan_node,
     search_node,
     writer_node,
+    evaluator_node,
 )
 
 
@@ -41,6 +42,7 @@ def create_research_graph():
     workflow.add_node("search",search_node)
     workflow.add_node("clarify",clarify_node)
     workflow.add_node("writer",writer_node)
+    workflow.add_node("evaluator",evaluator_node)
 
     #设置入口节点
     workflow.set_entry_point("router")
@@ -100,7 +102,8 @@ def create_research_graph():
         ["search"],
     )
     workflow.add_edge("search","writer")
-    workflow.add_edge("writer","finalize")
+    workflow.add_edge("writer","evaluator")
+    workflow.add_edge("evaluator","finalize")
     workflow.add_edge("finalize",END)
 
     return workflow.compile()

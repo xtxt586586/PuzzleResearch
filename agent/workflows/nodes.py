@@ -427,6 +427,184 @@ def writer_node(
     }
 
 
+def evaluator_node(
+        state: AgentState,
+        config: RunnableConfig,
+) -> Dict[str, Any]:
+    """
+    报告评估 Agent。
+
+    负责检查 Writer 生成的报告是否：
+    - 回答了用户问题；
+    - 覆盖了主要内容；
+    - 有足够的来源支持；
+    - 存在明显遗漏。
+    """
+
+    user_input = state.get("input","").strip()
+    report = (
+        state.get("draft_report","")
+        or state.get("final_report","")
+        or ""
+    ).strip()
+
+    if not user_input:
+        raise ValueError("Evaluator 缺少用户问题")
+
+    if not report:
+        raise ValueError("Evaluator 没有收到报告")
+
+    sources = state.get("sources") or []
+
+    sources_lines: list[str] = []
+
+    for index,source in enumerate(
+        sources[:12],
+        start=1,
+    ):
+        title = str(source.get("title","")).strip()
+        url = str(source.get("url","")).strip()
+
+        sources_lines.append(
+            f"[来源 {index}] {title}:{url}"
+        )
+
+    source_context = "\n".join(sources_lines)
+
+    llm = ModelFactory.for_task(
+        "evaluation",
+        temperature=0.0,
+    )
+
+    messages = [
+        SystemMessage(
+            content=(
+                "你是 PuzzleResearch 的报告评估 Agent。"
+                "请检查报告是否准确回答用户问题，"
+                "是否覆盖主要内容，"
+                "是否合理使用搜索来源。"
+                "请只返回 JSON，不要输出 Markdown 代码块。"
+                "\n\n"
+                "JSON 格式："
+                "\n"
+                "{"
+                '"verdict": "pass", '
+                '"evaluation": "总体评价", '
+                '"eval_dimensions": {'
+                '"accuracy": 0.0, '
+                '"completeness": 0.0, '
+                '"citation": 0.0'
+                "}, "
+                '"missing_topics": []'
+                "}"
+                "\n\n"
+                "verdict 只能是 pass 或 revise。"
+                "各项评分必须是 0 到 1 之间的数字。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"用户问题：\n{user_input}\n"
+                f"报告：\n{report}\n"
+                f"可用来源：\n{source_context}\n"
+            )
+        ),
+    ]
+
+    try:
+        response = llm.invoke(
+            messages,
+            config=config,
+        )
+
+        data = _parse_json_object(
+            _extract_response_text(response)
+        )
+
+        raw_verdict = str(
+            data.get("verdict","revise")
+        ).strip().lower()
+
+        if raw_verdict in {
+            "pass",
+            "通过",
+            "合格",
+            "ok",
+        }:
+            verdict = "pass"
+        else:
+            verdict = "revise"
+
+        evaluation = str(
+            data.get("evaluation","")
+        ).strip()
+
+        raw_dimensions = data.get(
+            "eval_dimensions",
+            {},
+        )
+
+        dimensions: Dict[str,float] = {}
+
+        if isinstance(raw_dimensions,dict):
+            for name,value in raw_dimensions.items():
+                try:
+                    score = float(value)
+                except (ValueError,TypeError):
+                    continue
+
+                dimensions[str(name)] = max(
+                    0.0,
+                    min(1.0, score),
+                )
+
+        raw_missing_topics = data.get(
+            "missing_topics",
+            [],
+        )
+
+        if isinstance(raw_missing_topics,str):
+            raw_missing_topics = [raw_missing_topics]
+
+        missing_topics = [
+            str(item).strip()
+            for item in raw_missing_topics
+            if str(item).strip()
+        ]
+
+        if not evaluation:
+            evaluation = "评估模型没有提供文字说明。"
+
+        print(
+            "[evaluator_node]",
+            f"verdict={verdict}",
+            f"missing_topics={missing_topics}",
+        )
+
+        return {
+            "evaluation": evaluation,
+            "verdict": verdict,
+            "eval_dimensions": dimensions,
+            "missing_topics": missing_topics,
+            "current_step": 4,
+            "status": "running",
+        }
+
+    except Exception as exc:
+        error_message = f"报告评估失败： {exc}"
+        print(f"报告评估失败： {exc}")
+        return {
+            "evaluation": (
+                "自动评估失败，本轮暂不阻断报告。"
+            ),
+            "verdict": "pass",
+            "eval_dimensions": {},
+            "missing_topics": [],
+            "errors": [error_message],
+            "current_step": 4,
+            "status": "running",
+        }
+
 
 def clarify_node(
     state: AgentState,
