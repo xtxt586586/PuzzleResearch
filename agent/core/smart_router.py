@@ -146,6 +146,85 @@ class SmartRouter:
     ) -> None:
         self.fallback_route = fallback_route
 
+    @staticmethod
+    def _explicit_decision(query: str) -> RouteDecision | None:
+        """识别无歧义的用户意图，避免明显请求被模型误分类。"""
+
+        normalized = query.lower()
+
+        agent_markers = (
+            "执行代码",
+            "运行代码",
+            "执行一段",
+            "运行一段",
+            "调用工具",
+            "读取文件",
+            "打开文件",
+            "操作浏览器",
+            "创建 excel",
+            "创建文件",
+        )
+        if any(marker in normalized for marker in agent_markers) or re.search(
+            r"(?:执行|运行).{0,20}(?:python|代码|脚本)",
+            normalized,
+        ):
+            return RouteDecision(
+                route="agent",
+                reasoning="用户明确要求执行代码、调用工具或操作外部资源。",
+                confidence=0.99,
+            )
+
+        deep_markers = (
+            "深入研究",
+            "深度研究",
+            "深度分析",
+            "多来源",
+            "多源分析",
+            "多角度分析",
+            "全面分析",
+            "系统分析",
+            "优缺点",
+        )
+        compares_multiple_subjects = bool(
+            re.search(
+                r"(?:比较|对比).{0,40}(?:和|与|vs)"
+                r"|(?:和|与).{0,40}(?:比较|对比)",
+                normalized,
+            )
+        )
+        if any(marker in normalized for marker in deep_markers) or compares_multiple_subjects:
+            return RouteDecision(
+                route="deep",
+                reasoning="用户要求多角度或多来源研究，需要综合分析。",
+                confidence=0.99,
+            )
+
+        search_is_negated = bool(
+            re.search(r"(?:不要|无需|不需要|不用)\s*(?:联网|搜索|检索)", query)
+        )
+        web_markers = (
+            "搜索",
+            "联网",
+            "查找",
+            "检索",
+            "最新",
+            "实时",
+            "今天",
+            "当前",
+            "新闻",
+            "官方文档",
+        )
+        if not search_is_negated and any(
+            marker in normalized for marker in web_markers
+        ):
+            return RouteDecision(
+                route="web",
+                reasoning="用户明确要求联网或获取实时、最新的网页信息。",
+                confidence=0.99,
+            )
+
+        return None
+
     def route(
             self,
             query: str,
@@ -171,6 +250,10 @@ class SmartRouter:
                 confidence=1.0,
                 clarification_question="请告诉我你希望完成什么任务？",
             )
+
+        explicit_decision = self._explicit_decision(query)
+        if explicit_decision is not None:
+            return explicit_decision
 
         try:
             llm = ModelFactory.for_task(

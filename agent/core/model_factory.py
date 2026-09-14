@@ -78,7 +78,11 @@ class ModelFactory:
             else settings.primary_model
         )
 
-        request_timeout = timeout or settings.model_timeout
+        request_timeout = (
+            settings.model_timeout
+            if timeout is None
+            else timeout
+        )
 
         return ChatOpenAI(
             model=model_name,

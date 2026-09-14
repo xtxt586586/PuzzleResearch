@@ -55,7 +55,25 @@ PuzzleResearch 是一个基于 LangGraph 的全功能 AI Agent 研究平台。
 
 ## 开发状态
 
-当前阶段：项目初始化和开发环境配置。
+当前阶段：阶段 13 已完成，已具备路由、Web Research、Deep Research、评估和迭代修订主流程。
+
+当前可以稳定运行的路径：
+
+- `direct`：直接问答
+- `web`：规划查询、并行搜索、写作和评估
+- `deep`：多查询、多轮补充研究、综合写作和评估修订
+- `clarify`：生成澄清问题并暂停本次执行
+
+`agent` 路径已经可以被识别，但工具执行节点尚未接入，会明确返回暂停状态，不会伪装成已执行工具。
+
+安装依赖：
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+API Key 只放在项目根目录的 `.env` 中；该文件已被 Git 忽略，不应提交。
 
 详细进度见：
 

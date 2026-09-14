@@ -32,11 +32,11 @@ def capped_add_messages(
 
     # 使用 LangGraph 官方的消息合并函数。
     # 它会正确处理消息 ID、消息覆盖和消息追加。
-    merged = add_messages(existing_messages,new_messages)
+    merged = add_messages(existing_messages, new_messages)
 
     # 当前配置类中还没有正式加入这些字段，
     # 因此使用 getattr 提供默认值，避免导入时出错。
-    trim_enabled = bool(getattr(settings,"trim_messages",True))
+    trim_enabled = bool(getattr(settings, "trim_messages", True))
 
     if not trim_enabled:
         return merged
@@ -62,6 +62,29 @@ def capped_add_messages(
     tail = merged[-keep_last:] if keep_last else []
 
     return head + tail
+
+
+def merge_unique_items(
+    existing: List[Dict[str, Any]] | None,
+    new: List[Dict[str, Any]] | None,
+) -> List[Dict[str, Any]]:
+    """合并并按 URL 去重并行节点产生的结果。"""
+
+    merged: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for item in (existing or []) + (new or []):
+        url = str(item.get("url", "")).strip()
+
+        if url:
+            key = url.rstrip("/")
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
+
+        merged.append(item)
+
+    return merged
 
 
 ExecutionStatus = Literal[
@@ -132,10 +155,10 @@ class AgentState(TypedDict,total=False):
     ]
 
     # 搜索节点写入的统一搜索结果。
-    # 使用 operator.add，便于未来并行搜索分支合并结果。
+    # 使用自定义 reducer，便于并行搜索分支合并并按 URL 去重。
     search_results: Annotated[
         List[Dict[str,Any]],
-        operator.add,
+        merge_unique_items,
     ]
 
     code_results: Annotated[
@@ -146,7 +169,7 @@ class AgentState(TypedDict,total=False):
     summary_notes: List[str]
     sources: Annotated[
         List[Dict[str,str]],
-        operator.add,
+        merge_unique_items,
     ]
 
     # ========== 质量控制 ==========
@@ -275,3 +298,4 @@ class QueryState(TypedDict):
     """
 
     query: str
+    search_mode: Literal["web", "deep"]

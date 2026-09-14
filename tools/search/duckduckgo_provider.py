@@ -16,10 +16,13 @@ class DuckDuckGoProvider:
 
     def is_available(self) -> bool:
         """
-        判断 duckduckgo-search 是否已经安装。
+        判断 ddgs 或旧版 duckduckgo-search 是否已经安装。
         """
 
-        return importlib.util.find_spec("duckduckgo_search") is not None
+        return any(
+            importlib.util.find_spec(module_name) is not None
+            for module_name in ("ddgs", "duckduckgo_search")
+        )
 
     def search(
         self,
@@ -37,11 +40,15 @@ class DuckDuckGoProvider:
 
         if not self.is_available():
             raise RuntimeError(
-                "未安装 duckduckgo-search，请先执行："
-                "python -m pip install duckduckgo-search"
+                "未安装 ddgs，请先执行："
+                "python -m pip install ddgs"
             )
 
-        from duckduckgo_search import DDGS
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            # 兼容当前仍在使用的旧包，避免升级依赖时中断搜索。
+            from duckduckgo_search import DDGS
 
         with DDGS() as ddgs:
             raw_results = list(

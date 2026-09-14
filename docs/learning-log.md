@@ -37,3 +37,51 @@ D:\pythonproject\PuzzleResearch\.venv
 
 Python：
 3.11.6
+
+### 阶段 1-4：配置、状态和模型工厂
+
+状态：已完成
+
+掌握内容：
+
+- 使用 Pydantic Settings 管理应用、模型、搜索和研究配置
+- 使用 `AgentState` 描述 LangGraph 的共享状态
+- 使用消息 reducer 合并并裁剪历史消息
+- 使用 `ChatOpenAI` 的兼容接口接入 DeepSeek
+
+### 阶段 5-10：路由、搜索和研究写作
+
+状态：已完成
+
+掌握内容：
+
+- 使用条件边实现 `direct`、`web`、`deep` 和 `clarify` 路由
+- 使用 Tavily 和 DuckDuckGo Provider 统一搜索结果结构
+- 使用 LangGraph `Send` 并行分发多个搜索查询
+- 使用 Planner、Writer 和引用列表生成 Web/Deep Research 报告
+- 为 DeepSeek 不支持的结构化输出增加普通 JSON 降级
+
+### 阶段 11-13：评估、修订和多轮深度研究
+
+状态：已完成
+
+掌握内容：
+
+- 使用 Evaluator 检查准确性、完整性和引用情况
+- 使用 Reviser 在预算内修订报告
+- 根据知识缺口生成后续查询并执行多轮 Deep Research
+- 使用最大修订次数和最大研究轮次阻止无限循环
+- 在当前阶段明确标记尚未接入的 Agent 工具执行能力
+
+### 阶段 13 后代码审查修复
+
+状态：已完成
+
+修复内容：
+
+- 修正 Deep Search 结果数配置未生效的问题
+- 修正筛选后的 Deep Research 上下文没有实际传给 Writer 的问题
+- 修正 `pass` 与非空缺失主题同时出现的质量契约冲突
+- 修正澄清和未接入工具任务被错误标记为 completed 的问题
+- 将用户输入写入消息历史，并对并行搜索结果按 URL 去重
+- 增加依赖清单、标准库回归测试和与实现同步的功能矩阵

@@ -23,7 +23,7 @@ class SearchManager:
 
     def __init__(
             self,
-            providers: Dict[str, SearchProvider] = None,
+            providers: Dict[str, SearchProvider] | None = None,
     ) -> None:
         if providers is None:
             providers = {

@@ -1,6 +1,10 @@
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic_settings import BaseSettings,SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -14,7 +18,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -51,13 +55,13 @@ class Settings(BaseSettings):
     # 保留最前面的消息，通常用于保留系统消息
     trim_messages_keep_first: int = 1
 
-    # 保留最后面的消息，通常用于保存最近绘画
+    # 保留最后面的消息，通常用于保存最近对话
     trim_messages_keep_last: int = 8
 
-    #当前阶段不启用中间消息摘要
+    # 当前阶段不启用中间消息摘要
     summary_messages: bool = False
 
-    #未来启用摘要时，达到该数量触发
+    # 未来启用摘要时，达到该数量触发
     summary_messages_trigger: int = 20
 
     # ========== 搜索服务配置 ==========
@@ -69,7 +73,7 @@ class Settings(BaseSettings):
     # 多个搜索引擎使用逗号分隔
     search_engines: str = "tavily,duckduckgo"
 
-    #Web Research 配置
+    # Web Research 配置
     web_max_queries: int = 3
     web_results_per_query: int = 5
 

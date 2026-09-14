@@ -16,67 +16,67 @@
 - [x] PyCharm 解释器配置
 - [x] Git 仓库
 - [x] 项目 README
-- [ ] 环境变量管理
+- [x] 环境变量管理
 - [ ] 日志系统
-- [ ] 配置系统
+- [x] 配置系统
 - [ ] Docker 基础环境
 
 ## 二、核心 Agent 架构
 
-- [ ] AgentState
-- [ ] 消息 reducer
-- [ ] LangGraph StateGraph
-- [ ] 路由节点
-- [ ] 条件边
-- [ ] 普通回答节点
-- [ ] Agent 节点
-- [ ] 澄清节点
-- [ ] Planner 节点
-- [ ] Writer 节点
-- [ ] Evaluator 节点
-- [ ] Reviser 节点
+- [x] AgentState
+- [x] 消息 reducer
+- [x] LangGraph StateGraph
+- [x] 路由节点
+- [x] 条件边
+- [x] 普通回答节点
+- [~] Agent 节点（已识别路由，工具执行尚未接入）
+- [x] 澄清节点
+- [x] Planner 节点
+- [x] Writer 节点
+- [x] Evaluator 节点
+- [x] Reviser 节点
 - [ ] Coordinator 节点
 
 ## 三、智能路由
 
-- [ ] direct 路由
-- [ ] agent 路由
-- [ ] web 路由
-- [ ] deep 路由
-- [ ] clarify 路由
-- [ ] 路由置信度
+- [x] direct 路由
+- [~] agent 路由（仅识别，工具节点待接入）
+- [x] web 路由
+- [x] deep 路由
+- [x] clarify 路由
+- [x] 路由置信度
 - [ ] 用户显式模式覆盖
-- [ ] 路由异常降级
+- [x] 路由异常降级
 
 ## 四、搜索系统
 
-- [ ] Tavily Provider
-- [ ] DuckDuckGo Provider
+- [x] Tavily Provider
+- [x] DuckDuckGo Provider
 - [ ] Brave Provider
 - [ ] Serper Provider
-- [ ] 多 Provider 搜索
-- [ ] Provider fallback
+- [x] 多 Provider 搜索
+- [x] Provider fallback
 - [ ] 搜索缓存
-- [ ] URL 去重
-- [ ] 搜索结果标准化
+- [x] URL 去重
+- [x] 搜索结果标准化
 - [ ] Provider 统计
 
 ## 五、Deep Research
 
-- [ ] 查询生成
-- [ ] 研究计划
-- [ ] 多轮线性研究
+- [x] 查询生成
+- [x] 研究计划
+- [x] 多轮线性研究
 - [ ] 树状研究
-- [ ] 分支并行
+- [x] 分支并行
 - [ ] 搜索结果摘要
 - [ ] 网页正文抓取
 - [ ] 证据段落提取
 - [ ] 知识缺口检测
-- [ ] 后续查询生成
-- [ ] 来源整理
-- [ ] 报告生成
-- [ ] 引用附加
-- [ ] 研究预算
+- [x] 后续查询生成
+- [x] 来源整理
+- [x] 报告生成
+- [x] 引用附加
+- [x] 研究预算
 - [ ] 研究取消
 
 ## 六、Agent 工具系统
@@ -125,7 +125,7 @@
 
 ## 九、质量控制
 
-- [ ] Evaluator
+- [x] Evaluator
 - [ ] coverage 评估
 - [ ] accuracy 评估
 - [ ] freshness 评估
@@ -133,9 +133,9 @@
 - [ ] QualityAssessor
 - [ ] ClaimVerifier
 - [ ] citation gate
-- [ ] 缺失主题检测
-- [ ] 报告修订
-- [ ] 最大修订次数
+- [x] 缺失主题检测
+- [x] 报告修订
+- [x] 最大修订次数
 
 ## 十、会话和人工介入
 

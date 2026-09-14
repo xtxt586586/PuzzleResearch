@@ -119,18 +119,16 @@ def _append_source_references(
     reference_lines: list[str] = []
     seen_urls: set[str] = set()
 
-    for index, item in enumerate(
-        search_results[:max_sources],
-        start=1,
-    ):
+    for item in search_results[:max_sources]:
         title = str(item.get("title", "")).strip()
         url = str(item.get("url", "")).strip()
 
         if not url or url in seen_urls:
             continue
 
+        reference_number = len(reference_lines) + 1
         reference_lines.append(
-            f"[来源 {index}] {title}：{url}"
+            f"[来源 {reference_number}] {title}：{url}"
         )
         seen_urls.add(url)
 
@@ -197,7 +195,10 @@ def router_node(
         f"confidence={result['routing_confidence']:.2f}"
     )
 
-    return result
+    return {
+        **result,
+        "messages": [HumanMessage(content=user_input)],
+    }
 
 
 def web_plan_node(
@@ -606,10 +607,24 @@ def search_node(
             "errors": ["搜索分支没有收到有效 query"]
         }
 
-    max_results = max(
-        int(getattr(settings,"web_results_per_query",5)),
-        1,
-    )
+    search_mode = str(
+        state.get("search_mode", "web")
+    ).strip().lower()
+
+    if search_mode == "deep":
+        result_limit = getattr(
+            settings,
+            "deepsearch_results_per_query",
+            5,
+        )
+    else:
+        result_limit = getattr(
+            settings,
+            "web_results_per_query",
+            5,
+        )
+
+    max_results = max(int(result_limit), 1)
 
     manager = SearchManager()
 
@@ -797,7 +812,7 @@ def deep_writer_node(
     context_blocks: list[str] = []
 
     for index,item in enumerate(
-        search_results[:20],
+        selected_results,
         start=1,
     ):
         title = str(item.get("title","")).strip()
@@ -1035,6 +1050,10 @@ def evaluator_node(
             for item in raw_missing_topics
             if str(item).strip()
         ]
+
+        # 评估器不能同时声称通过并报告已知遗漏。
+        if verdict == "pass" and missing_topics:
+            verdict = "revise"
 
         if not evaluation:
             evaluation = "评估模型没有提供文字说明。"
@@ -1286,6 +1305,25 @@ def clarify_node(
     }
 
 
+def agent_unavailable_node(
+    state: AgentState,
+) -> Dict[str, Any]:
+    """在工具执行节点接入前，明确告知用户当前能力边界。"""
+
+    message = (
+        "已识别为需要工具执行的任务，但当前版本尚未接入 Agent 工具执行节点。"
+        "工具执行能力将在后续阶段启用。"
+    )
+
+    return {
+        "draft_report": message,
+        "final_report": message,
+        "messages": [AIMessage(content=message)],
+        "is_complete": False,
+        "status": "paused",
+    }
+
+
 def direct_answer_node(
     state: AgentState,
     config: RunnableConfig,
@@ -1350,8 +1388,14 @@ def finalize_node(
     """
     report = state.get("final_report") or state.get("draft_report","")
 
+    is_paused = (
+        state.get("status") == "paused"
+        or state.get("route") == "clarify"
+        or bool(state.get("needs_clarification"))
+    )
+
     return {
         "final_report": report,
-        "is_complete": True,
-        "status": "completed",
+        "is_complete": not is_paused,
+        "status": "paused" if is_paused else "completed",
     }

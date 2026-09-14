@@ -19,6 +19,7 @@ from agent.workflows.nodes import (
     deep_writer_node,
     evaluator_node,
     revise_node,
+    agent_unavailable_node,
 )
 
 
@@ -63,6 +64,7 @@ def create_research_graph():
     workflow.add_node("search",search_node)
     workflow.add_node("deep_search",search_node)
     workflow.add_node("clarify",clarify_node)
+    workflow.add_node("agent_unavailable", agent_unavailable_node)
     workflow.add_node("writer",writer_node)
     workflow.add_node("deep_writer",deep_writer_node)
     workflow.add_node("evaluator",evaluator_node)
@@ -75,12 +77,9 @@ def create_research_graph():
         """
         根据 Router 写入的 route 字段选择下一个节点。
 
-        当前阶段只实现两条实际路径：
-
-        - clarify → clarify
-        - 其他合法路径 → direct_answer
-
-        web、agent、deep 后续再分别接入真实节点。
+        direct、clarify、web 和 deep 路径进入各自节点。
+        agent 路径当前进入能力边界提示节点，
+        因为工具执行节点尚未接入。
         """
 
         route = state.get("route", "clarify")
@@ -105,8 +104,9 @@ def create_research_graph():
         if route == "deep":
             return "deep_plan"
 
-        # 当前阶段所有路径都进入 direct_answer。
-        # 后续会把 agent/web/deep 替换成真正的节点。
+        if route == "agent":
+            return "agent_unavailable"
+
         return "direct_answer"
 
     #添加决策边
@@ -118,12 +118,14 @@ def create_research_graph():
             "clarify": "clarify",
             "web_plan": "web_plan",
             "deep_plan": "deep_plan",
+            "agent_unavailable": "agent_unavailable",
         },
     )
 
     #添加普通边
     workflow.add_edge("direct_answer","finalize")
     workflow.add_edge("clarify","finalize")
+    workflow.add_edge("agent_unavailable", "finalize")
     workflow.add_conditional_edges(
         "web_plan",
         fan_out_searches,
@@ -192,6 +194,7 @@ def _collect_research_queries(
 def _fan_out_to_search_node(
         state: AgentState,
         target_node: str,
+        search_mode: str,
 ) -> list[Send]:
     """
     将多个研究查询分发到指定搜索节点。
@@ -211,6 +214,7 @@ def _fan_out_to_search_node(
             target_node,
             {
                 "query": query,
+                "search_mode": search_mode,
             },
         )
         for query in queries
@@ -227,6 +231,7 @@ def fan_out_searches(
     return _fan_out_to_search_node(
         state,
         "search",
+        "web",
     )
 
 
@@ -239,6 +244,7 @@ def fan_out_deep_searches(
     return _fan_out_to_search_node(
         state,
         "deep_search",
+        "deep",
     )
 
 
@@ -257,6 +263,19 @@ def evaluation_decision(
     verdict = str(
         state.get("verdict","pass")
     ).strip().lower()
+
+    raw_missing_topics = state.get("missing_topics") or []
+    if isinstance(raw_missing_topics, str):
+        raw_missing_topics = [raw_missing_topics]
+
+    has_missing_topics = any(
+        str(topic).strip()
+        for topic in raw_missing_topics
+    )
+
+    # 缺失主题与 pass 矛盾，优先遵守质量契约，避免报告带着已知缺口结束。
+    if verdict == "pass" and has_missing_topics:
+        verdict = "revise"
 
 
     route = str(

@@ -1,0 +1,165 @@
+import unittest
+from unittest.mock import patch
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+from agent.core.graph import (
+    create_research_graph,
+    evaluation_decision,
+    fan_out_deep_searches,
+)
+from agent.core.smart_router import SmartRouter
+from agent.core.state import capped_add_messages, merge_unique_items
+from agent.workflows.nodes import (
+    _parse_json_object,
+    _parse_plan_response,
+    agent_unavailable_node,
+    finalize_node,
+)
+from common.config import settings
+
+
+class CoreContractTests(unittest.TestCase):
+    def test_message_reducer_keeps_head_and_tail(self):
+        with patch.object(settings, "trim_messages", True), patch.object(
+            settings, "trim_messages_keep_first", 1
+        ), patch.object(settings, "trim_messages_keep_last", 2):
+            merged = capped_add_messages(
+                [SystemMessage(content="system")],
+                [
+                    HumanMessage(content="old"),
+                    AIMessage(content="middle"),
+                    HumanMessage(content="latest"),
+                ],
+            )
+
+        self.assertEqual(
+            [message.content for message in merged],
+            ["system", "middle", "latest"],
+        )
+
+    def test_search_result_reducer_deduplicates_urls(self):
+        merged = merge_unique_items(
+            [{"url": "https://example.com/"}],
+            [
+                {"url": "https://example.com"},
+                {"url": "https://other.example.com"},
+            ],
+        )
+
+        self.assertEqual(
+            [item["url"] for item in merged],
+            ["https://example.com/", "https://other.example.com"],
+        )
+
+    def test_explicit_router_intent_is_stable(self):
+        with patch(
+            "agent.core.smart_router.ModelFactory.for_task",
+            side_effect=AssertionError("explicit intent should not call the LLM"),
+        ):
+            self.assertEqual(
+                SmartRouter().route("请联网搜索最新新闻").route,
+                "web",
+            )
+
+        self.assertEqual(
+            SmartRouter._explicit_decision("请联网搜索最新新闻").route,
+            "web",
+        )
+        self.assertEqual(
+            SmartRouter._explicit_decision(
+                "请比较 PostgreSQL 和 MySQL 的优缺点"
+            ).route,
+            "deep",
+        )
+        self.assertEqual(
+            SmartRouter._explicit_decision("请执行 Python 代码").route,
+            "agent",
+        )
+        self.assertIsNone(
+            SmartRouter._explicit_decision("什么是 LangGraph")
+        )
+
+    def test_plan_and_json_parsers_accept_model_text(self):
+        self.assertEqual(
+            _parse_json_object('说明\n```json\n{"ok": true}\n```'),
+            {"ok": True},
+        )
+        queries, reasoning = _parse_plan_response(
+            type(
+                "Response",
+                (),
+                {"content": '{"queries": ["a", "a", "b"], "reasoning": "r"}'},
+            )()
+        )
+        self.assertEqual(queries, ["a", "b"])
+        self.assertEqual(reasoning, "r")
+
+    def test_deep_fan_out_carries_search_mode(self):
+        sends = fan_out_deep_searches({"research_plan": ["query"]})
+
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0].node, "deep_search")
+        self.assertEqual(sends[0].arg["search_mode"], "deep")
+
+    def test_quality_decision_does_not_pass_with_missing_topics(self):
+        self.assertEqual(
+            evaluation_decision(
+                {
+                    "route": "web",
+                    "verdict": "pass",
+                    "missing_topics": ["缺失主题"],
+                    "revision_count": 0,
+                    "max_revisions": 1,
+                }
+            ),
+            "revise",
+        )
+        self.assertEqual(
+            evaluation_decision(
+                {
+                    "route": "deep",
+                    "verdict": "pass",
+                    "missing_topics": ["缺失主题"],
+                    "deepsearch_epoch": 1,
+                    "deepsearch_max_epochs": 2,
+                }
+            ),
+            "deep_followup",
+        )
+
+    def test_finalize_preserves_paused_clarification_state(self):
+        result = finalize_node(
+            {
+                "route": "clarify",
+                "final_report": "请补充信息",
+                "status": "running",
+            }
+        )
+
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(result["status"], "paused")
+
+    def test_agent_route_reports_unavailable_capability(self):
+        result = agent_unavailable_node({"route": "agent"})
+
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(result["status"], "paused")
+        self.assertIn("尚未接入", result["final_report"])
+
+    def test_graph_routes_agent_request_to_paused_boundary(self):
+        result = create_research_graph().invoke(
+            {"input": "请执行 Python 代码", "messages": []}
+        )
+
+        self.assertEqual(result["route"], "agent")
+        self.assertEqual(result["status"], "paused")
+        self.assertFalse(result["is_complete"])
+
+    def test_graph_compiles(self):
+        graph = create_research_graph()
+        self.assertIsNotNone(graph.get_graph())
+
+
+if __name__ == "__main__":
+    unittest.main()
