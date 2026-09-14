@@ -106,6 +106,44 @@ def _parse_plan_response(
     return queries, reasoning
 
 
+
+def _append_source_references(
+    answer: str,
+    search_results: list[Dict[str, Any]],
+) -> str:
+    """
+    为报告追加去重后的来源列表。
+    """
+
+    reference_lines: list[str] = []
+    seen_urls: set[str] = set()
+
+    for index, item in enumerate(
+        search_results[:12],
+        start=1,
+    ):
+        title = str(item.get("title", "")).strip()
+        url = str(item.get("url", "")).strip()
+
+        if not url or url in seen_urls:
+            continue
+
+        reference_lines.append(
+            f"[来源 {index}] {title}：{url}"
+        )
+        seen_urls.add(url)
+
+    if not reference_lines:
+        return answer
+
+    return (
+        answer
+        + "\n\n参考来源：\n"
+        + "\n".join(reference_lines)
+    )
+
+
+
 def router_node(
     state: AgentState,
     config: RunnableConfig,
@@ -227,6 +265,11 @@ def web_plan_node(
 
     return {
         "research_plan": queries,
+        "revision_count": 0,
+        "max_revisions": max(
+            int(getattr(settings,"web_max_revisions",2)),
+            0,
+        ),
         "current_step": 1,
         "status": "running",
     }
@@ -391,29 +434,10 @@ def writer_node(
     if not answer:
         raise ValueError("Writer 模型返回了空回答")
 
-    reference_lines: list[str] = []
-    seen_urls: set[str] = set()
-
-    for index,item in enumerate(
-        search_results[:12],
-        start=1,
-    ):
-        title = str(item.get("title","")).strip()
-        url = str(item.get("url","")).strip()
-
-        if not url or url in seen_urls:
-            continue
-
-        reference_lines.append(
-            f"[来源 {index}] {title}:{url}\n"
-        )
-        seen_urls.add(url)
-
-    if reference_lines:
-        answer += (
-            "\n\n参考来源：\n"
-            + "\n".join(reference_lines)
-        )
+    answer = _append_source_references(
+        answer,
+        search_results,
+    )
 
     return {
         "draft_report": answer,
@@ -602,6 +626,130 @@ def evaluator_node(
             "missing_topics": [],
             "errors": [error_message],
             "current_step": 4,
+            "status": "running",
+        }
+
+
+
+def revise_node(
+        state: AgentState,
+        config: RunnableConfig,
+) -> Dict[str,Any]:
+    """
+    根据评估结果修订研究报告。
+
+    Revision Agent 不重新搜索，而是：
+    - 保留原报告中的正确内容；
+    - 补充评估器指出的遗漏主题；
+    - 修正不准确的表述；
+    - 继续使用已有搜索来源。
+    """
+
+    user_input = state.get("input","").strip()
+    report = (
+        state.get("draft_report","")
+        or state.get("final_report","")
+        or ""
+    ).strip()
+
+    search_results = state.get("search_results") or []
+    missing_topics = state.get("missing_topics") or []
+
+    if not user_input:
+        raise ValueError("Revision Agent 缺少用户问题")
+
+    if not report:
+        raise ValueError("Revision Agent 缺少收到原始报告")
+
+    revision_count = int(
+        state.get("revision_count", 0)
+    ) + 1
+
+    context_blocks: list[str] = []
+
+    for index,item in enumerate(
+        search_results[:12],
+        start=1,
+    ):
+        title = str(item.get("title","")).strip()
+        url = str(item.get("url","")).strip()
+        snippet = str(item.get("snippet","")).strip()
+        content = str(item.get("content","")).strip()
+
+        excerpt = (content or snippet)[:2000]
+
+        context_blocks.append(
+            f"【来源 {index}】\n"
+            f"标题：{title}\n"
+            f"链接：{url}\n"
+            f"内容：{excerpt}\n"
+        )
+
+        source_context = "\n\n".join(context_blocks)
+
+        missing_topic_text = "\n".join(
+            f"- {str(topic).strip()}"
+            for topic in missing_topics
+            if str(topic).strip()
+        )
+
+        llm = ModelFactory.for_task(
+            "writing",
+            temperature=0.3,
+        )
+
+        messages = [
+            SystemMessage(
+                content=(
+                    "你是 PuzzleResearch 的报告修订 Agent。"
+                    "请根据评估意见修订原始报告。"
+                    "保留原报告中正确的内容，"
+                    "补充缺失主题，修正不准确的表述。"
+                    "只能使用提供的搜索来源，不能编造事实。"
+                    "引用来源时使用 [来源1]、[来源2] 格式。"
+                    "请直接返回修订后的完整报告正文。"
+                    "不要输出修订说明。"
+                    "不要单独添加参考来源列表，程序会自动追加。"
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"用户问题：\n{user_input}\n\n"
+                    f"原始报告：\n{report}\n\n"
+                    f"评估指出的遗漏主题：\n"
+                    f"{missing_topic_text or '无明确遗漏主题'}\n\n"
+                    f"搜索来源：\n{source_context}"
+                )
+            ),
+        ]
+
+        response = llm.invoke(
+            messages,
+            config=config,
+        )
+
+        revised_report = _extract_response_text(
+            response
+        ).strip()
+
+        if not revised_report:
+            raise ValueError("Revision Agent 返回了空报告")
+
+        revised_report = _append_source_references(
+            revised_report,
+            search_results,
+        )
+
+        print(
+            "[revise_node]",
+            f"revision_count={revision_count}",
+            f"missing_topics={missing_topics}",
+        )
+
+        return {
+            "draft_report": revised_report,
+            "final_report": revised_report,
+            "revision_count": revision_count,
             "status": "running",
         }
 

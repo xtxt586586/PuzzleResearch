@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from langgraph.graph import END,StateGraph
 from langgraph.types import Send
 
@@ -13,6 +15,7 @@ from agent.workflows.nodes import (
     search_node,
     writer_node,
     evaluator_node,
+    revise_node,
 )
 
 
@@ -43,6 +46,7 @@ def create_research_graph():
     workflow.add_node("clarify",clarify_node)
     workflow.add_node("writer",writer_node)
     workflow.add_node("evaluator",evaluator_node)
+    workflow.add_node("revise",revise_node)
 
     #设置入口节点
     workflow.set_entry_point("router")
@@ -103,7 +107,15 @@ def create_research_graph():
     )
     workflow.add_edge("search","writer")
     workflow.add_edge("writer","evaluator")
-    workflow.add_edge("evaluator","finalize")
+    workflow.add_conditional_edges(
+        "evaluator",
+        evaluation_decision,
+        {
+            "revise": "revise",
+            "finalize": "finalize",
+        },
+    )
+    workflow.add_edge("revise","evaluator")
     workflow.add_edge("finalize",END)
 
     return workflow.compile()
@@ -154,3 +166,51 @@ def fan_out_searches(
         )
         for query in queries
     ]
+
+
+
+def evaluation_decision(
+        state: AgentState
+) -> Literal["revise","finalize"]:
+    """
+    根据评估结果决定修订或结束。
+
+    即使评估结果要求修订，
+    达到最大修订次数后也必须结束，
+    防止图进入无限循环。
+    """
+
+    verdict = str(
+        state.get("verdict","pass")
+    ).strip().lower()
+
+    revision_count = int(
+        state.get("revision_count", 0)
+    )
+
+    max_revisions = max(
+        int(state.get("max_revisions", 2)),
+        0,
+    )
+
+    if (
+        verdict == "revise"
+        and revision_count < max_revisions
+    ):
+        print(
+            "[evaluation_decision]",
+            "route=revise",
+            f"revision_count={revision_count}",
+            f"max_revisions={max_revisions}",
+        )
+        return "revise"
+
+    print(
+        "[evaluation_decision]",
+        "route=finalize",
+        f"verdict={verdict}",
+        f"revision_count={revision_count}",
+        f"max_revisions={max_revisions}",
+    )
+
+    return "finalize"
