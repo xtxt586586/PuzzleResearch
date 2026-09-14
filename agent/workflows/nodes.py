@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage,HumanMessage,SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from agent.core.model_factory import ModelFactory
-from agent.core.state import AgentState
+from agent.core.state import AgentState,QueryState
 from agent.core.smart_router import smart_route
 from common.config import settings
 from tools.search import SearchManager
@@ -233,29 +233,22 @@ def web_plan_node(
 
 
 def search_node(
-        state: AgentState
+        state: QueryState,
 ) -> Dict[str,Any]:
     """
-    执行 Web 搜索，并把结果写入 AgentState。
+    执行单个查询的搜索任务。
+
+    该节点由 LangGraph Send 分发执行。
+    每个节点实例只处理一个 query。
     """
 
-    raw_queries = state.get("research_plan") or []
 
-    queries: list[str] = []
+    query = state.get("query","").strip()
 
-    for item in raw_queries:
-        query = str(item).strip()
-
-        if query:
-            queries.append(query)
-
-    if not queries:
-        user_input = state.get("input","").strip()
-
-        if not user_input:
-            raise ValueError("没有可执行的搜索查询")
-
-        queries = [user_input]
+    if not query:
+        return {
+            "errors": ["搜索分支没有收到有效 query"]
+        }
 
     max_results = max(
         int(getattr(settings,"web_results_per_query",5)),
@@ -264,72 +257,64 @@ def search_node(
 
     manager = SearchManager()
 
-    all_results: list[Dict[str,Any]] = []
+    try:
+        results = manager.search(
+            query,
+            max_results=max_results,
+        )
+
+    except Exception as exc:
+        error_message = (
+            f"查询「{query}」失败：{exc}"
+        )
+        print(f"[search_node] {error_message}")
+
+        return {
+            "errors": [error_message],
+        }
+
+    if not results:
+        error_message = f"查询「{query}」没有得到任何结果"
+        print(f"[search_node] {error_message}")
+
+        return {
+            "errors": [error_message],
+        }
+
+    search_results: list[Dict[str,Any]] = []
     sources: list[Dict[str,str]] = []
-    errors: list[str] = []
 
-    for query in queries:
-        try:
-            results = manager.search(
-                query,
-                max_results=max_results,
-            )
+    for item in results:
+        normalized_item = {
+            "query": query,
+            "title": str(item.get("title","")),
+            "url": str(item.get("url","")),
+            "snippet": str(item.get("snippet","")),
+            "content": str(item.get("content","")),
+            "provider": str(item.get("provider","")),
+        }
 
-        except Exception as exc:
-            error_messages = (
-                f"查询「{query}」失败：{exc}"
-            )
-            print(f"[search_node] {error_messages}")
-            errors.append(error_messages)
-            continue
+        search_results.append(normalized_item)
 
-        for item in results:
-            normalized_item = {
+        sources.append(
+            {
+                "title": normalized_item["title"],
+                "url": normalized_item["url"],
+                "provider": normalized_item["provider"],
                 "query": query,
-                "title": str(item.get("title","")),
-                "url": str(item.get("url","")),
-                "snippet": str(item.get("snippet","")),
-                "content": str(item.get("content","")),
-                "provider": str(item.get("provider","")),
             }
-
-            all_results.append(normalized_item)
-
-            sources.append(
-                {
-                    "title": normalized_item["title"],
-                    "url": normalized_item["url"],
-                    "provider": normalized_item["provider"],
-                    "query": query,
-                }
-            )
-
-    if not all_results:
-        error_detail = "；".join(errors) or "搜索 Provider 返回空结果"
-
-        raise RuntimeError(
-            f"Web 搜索没有得到任何结果：{error_detail}"
         )
 
     print(
         "[search_node]",
-        f"queries={len(queries)}",
-        f"results={len(all_results)}",
-        f"sources={len(sources)}",
+        f"query={query}",
+        f"results={len(search_results)}",
     )
 
-    update: Dict[str, Any] = {
-        "search_results": all_results,
+    return {
+        "search_results": search_results,
         "sources": sources,
-        "current_step": 2,
-        "status": "running",
     }
-
-    if errors:
-        update["errors"] = errors
-        update["last_error"] = "；".join(errors)
-
-    return update
 
 
 def writer_node(

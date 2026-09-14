@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END,StateGraph
+from langgraph.types import Send
 
 from agent.core.state import AgentState
 from agent.workflows.nodes import (
@@ -93,14 +94,60 @@ def create_research_graph():
     #添加普通边
     workflow.add_edge("direct_answer","finalize")
     workflow.add_edge("clarify","finalize")
-    workflow.add_edge("web_plan","search")
+    workflow.add_conditional_edges(
+        "web_plan",
+        fan_out_searches,
+        ["search"],
+    )
     workflow.add_edge("search","writer")
     workflow.add_edge("writer","finalize")
     workflow.add_edge("finalize",END)
 
     return workflow.compile()
 
-    # #编译工作流
-    # graph = workflow.compile()
-    #
-    # return graph
+
+
+def fan_out_searches(
+        state: AgentState
+) -> list[Send]:
+    """
+    根据 research_plan 创建并行搜索分支。
+    """
+
+    raw_queries = state.get("research_plan") or []
+
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    for item in raw_queries:
+        query = str(item).strip()
+
+        if query and query not in seen:
+            queries.append(query)
+            seen.add(query)
+
+
+    if not queries:
+        user_input = state.get("input","").strip()
+
+        if user_input:
+            queries = [user_input]
+
+    if not queries:
+        raise ValueError("没有可分发的搜索查询")
+
+    print(
+        "[fan_out_searches]",
+        f"branches={len(queries)}",
+        f"queries={queries}",
+    )
+
+    return [
+        Send(
+            "search",
+            {
+                "query": query,
+            },
+        )
+        for query in queries
+    ]

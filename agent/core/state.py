@@ -144,7 +144,10 @@ class AgentState(TypedDict,total=False):
     ]
 
     summary_notes: List[str]
-    sources: List[Dict[str,str]]
+    sources: Annotated[
+        List[Dict[str,str]],
+        operator.add,
+    ]
 
     # ========== 质量控制 ==========
 
