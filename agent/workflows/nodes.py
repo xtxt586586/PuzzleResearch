@@ -110,6 +110,7 @@ def _parse_plan_response(
 def _append_source_references(
     answer: str,
     search_results: list[Dict[str, Any]],
+    max_sources: int = 12,
 ) -> str:
     """
     为报告追加去重后的来源列表。
@@ -119,7 +120,7 @@ def _append_source_references(
     seen_urls: set[str] = set()
 
     for index, item in enumerate(
-        search_results[:12],
+        search_results[:max_sources],
         start=1,
     ):
         title = str(item.get("title", "")).strip()
@@ -270,6 +271,116 @@ def web_plan_node(
             int(getattr(settings,"max_revisions",2)),
             0,
         ),
+        "current_step": 1,
+        "status": "running",
+    }
+
+
+def deep_plan_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str,Any]:
+    """
+    Deep Research 规划节点。
+
+    与 Web Research 的区别：
+    - 查询数量更多；
+    - 查询角度更加互补；
+    - 目标是多来源综合研究；
+    - 结果会交给专门的 Deep Writer。
+    """
+    user_input = state.get("input","").strip()
+
+    if not user_input:
+        raise ValueError("AgentState.input 不能为空")
+
+    max_queries = max(
+        int(getattr(settings,"deepsearch_query_num",5)),
+        1,
+    )
+
+    suggested_queries = state.get("suggested_queries") or []
+
+    queries: list[str] = []
+    seen: set[str] = set()
+    for item in suggested_queries:
+        query = str(item).strip()
+
+        if query and query not in seen:
+            queries.append(query)
+            seen.add(query)
+
+    reasoning = ""
+
+    if queries:
+        queries = queries[:max_queries]
+        reasoning = "复用 Router 提供的深度研究查询建议。"
+
+    else:
+        llm = ModelFactory.for_task(
+            "planning",
+            temperature=0.2,
+        )
+
+        messages = [
+            SystemMessage(
+                content=(
+                    "你是 PuzzleResearch 的 Deep Research Planner。"
+                    "请为用户问题设计多角度、多来源的研究查询。"
+                    "查询应该互补，不能只是同一句话的重复。"
+                    "可以从定义、原理、实践、优缺点、争议、"
+                    "官方资料等不同角度设计查询。"
+                    f"最多生成 {max_queries} 个查询。"
+                    "只返回 JSON，不要输出 Markdown 代码块。"
+                    "\n\n"
+                    "JSON 格式："
+                    "\n"
+                    "{"
+                    '"queries": ["查询一", "查询二"], '
+                    '"reasoning": "研究规划原因"'
+                    "}"
+                )
+            ),
+            HumanMessage(
+                content=f"用户问题：\n{user_input}"
+            ),
+        ]
+
+        try:
+            response = llm.invoke(
+                messages,
+                config=config,
+            )
+
+            queries, reasoning = _parse_plan_response(response)
+            queries = queries[:max_queries]
+
+        except Exception as exc:
+            print(f"[deep_plan_node] 规划失败，使用原问题：{exc}")
+            queries = [user_input]
+            reasoning = "深度规划失败，使用用户原始问题搜索。"
+
+    if not queries:
+        queries = [user_input]
+        reasoning = "没有生成有效查询，使用用户原始问题搜索。"
+
+    print(
+        "[deep_plan_node]",
+        f"queries={queries}",
+        f"reasoning={reasoning}",
+    )
+    return {
+        "research_plan": queries,
+        "revision_count": 0,
+        "max_revisions": max(
+            int(getattr(settings,"max_revisions",2)),
+            0,
+        ),
+        "deepsearch_artifacts": {
+            "phase": "planned",
+            "query_count": len(queries),
+            "reasoning": reasoning,
+        },
         "current_step": 1,
         "status": "running",
     }
@@ -451,6 +562,115 @@ def writer_node(
     }
 
 
+
+def deep_writer_node(
+        state: AgentState,
+        config: RunnableConfig,
+) -> Dict[str, Any]:
+    """
+    Deep Research 综合写作节点。
+
+    负责：
+    - 综合多个查询返回的搜索结果；
+    - 对不同来源进行交叉比较；
+    - 明确指出来源之间的差异；
+    - 生成结构化的深度报告。
+    """
+
+    user_input = state.get("input","").strip()
+    search_results = state.get("search_results") or []
+
+    if not user_input:
+        raise ValueError("Deep Writer 缺少用户问题")
+
+    if not search_results:
+        raise ValueError("Deep Writer 没有收到搜索结果")
+
+    context_blocks: list[str] = []
+
+    for index,item in enumerate(
+        search_results[:20],
+        start=1,
+    ):
+        title = str(item.get("title","")).strip()
+        url = str(item.get("url","")).strip()
+        query = str(item.get("query","")).strip()
+        snippet = str(item.get("snippet","")).strip()
+        content = str(item.get("content","")).strip()
+
+        excerpt = (content or snippet)[:2200]
+
+        context_blocks.append(
+            f"【来源 {index}】\n"
+            f"所属查询：{query}\n"
+            f"标题：{title}\n"
+            f"链接：{url}\n"
+            f"内容：{excerpt}\n"
+        )
+
+    research_context = "\n\n".join(context_blocks)
+
+    llm = ModelFactory.for_task(
+        "writing",
+        temperature=0.3,
+    )
+
+    messages = [
+        SystemMessage(
+            content=(
+                "你是 PuzzleResearch 的 Deep Research Writer。"
+                "请根据用户问题和多个搜索来源撰写深度研究报告。"
+                "报告必须综合多个来源，而不是简单罗列搜索结果。"
+                "请区分事实、推断和观点。"
+                "如果不同来源存在冲突，请明确指出。"
+                "不要编造搜索结果中没有出现的事实。"
+                "引用来源时使用 [来源1]、[来源2] 格式。"
+                "建议使用清晰的标题和小节。"
+                "直接输出完整报告，不要描述内部工作流程。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"用户问题：\n{user_input}\n"
+                f"多来源研究材料：\n{research_context}\n"
+            )
+        ),
+    ]
+
+    response = llm.invoke(
+        messages,
+        config=config,
+    )
+
+    answer = _extract_response_text(response).strip()
+
+    if not answer:
+        raise ValueError("Deep Writer 模型返回了空回答")
+
+    answer = _append_source_references(
+        answer,
+        search_results,
+        max_sources=20,
+    )
+
+    return {
+        "draft_report": answer,
+        "final_report": answer,
+        "messages": [
+            AIMessage(content=answer)
+        ],
+        "deepsearch_artifacts": {
+            "phase": "synthesized",
+            "result_count": len(search_results),
+        },
+        "current_step": 3,
+        "is_complete": False,
+        "status": "running",
+    }
+
+
+
+
 def evaluator_node(
         state: AgentState,
         config: RunnableConfig,
@@ -482,8 +702,14 @@ def evaluator_node(
 
     sources_lines: list[str] = []
 
+    source_limit = (
+        20
+        if state.get("route") == "deep"
+        else 12
+    )
+
     for index,source in enumerate(
-        sources[:12],
+        sources[:source_limit],
         start=1,
     ):
         title = str(source.get("title","")).strip()
@@ -667,8 +893,14 @@ def revise_node(
 
     context_blocks: list[str] = []
 
+    source_limit = (
+        20
+        if state.get("route") == "deep"
+        else 12
+    )
+
     for index,item in enumerate(
-        search_results[:12],
+        search_results[:source_limit],
         start=1,
     ):
         title = str(item.get("title","")).strip()
@@ -738,6 +970,7 @@ def revise_node(
     revised_report = _append_source_references(
         revised_report,
         search_results,
+        max_sources=source_limit,
     )
 
     print(

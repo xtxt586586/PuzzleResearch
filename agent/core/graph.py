@@ -12,8 +12,10 @@ from agent.workflows.nodes import (
     router_node,
     clarify_node,
     web_plan_node,
+    deep_plan_node,
     search_node,
     writer_node,
+    deep_writer_node,
     evaluator_node,
     revise_node,
 )
@@ -23,18 +25,27 @@ def create_research_graph():
     """
     创建 PuzzleResearch 主研究图。
 
-    当前阶段：
+    当前主要路径：
+
         router
-          ├── direct
-          ├── agent
-          ├── web
-          ├── deep
-          └── clarify
-                ↓
-          direct_answer
-                ↓
-             finalize
+          ├── direct → direct_answer → finalize
+          ├── clarify → clarify → finalize
+          ├── web → web_plan
+          │          ↓
+          │      parallel search
+          │          ↓
+          │        writer
+          │
+          └── deep → deep_plan
+                     ↓
+                 parallel deep_search
+                     ↓
+                 deep_writer
+
+        web/deep 两条研究路径都会经过：
+        evaluator → revise 或 finalize
     """
+
     workflow = StateGraph(AgentState)
 
     #注册节点
@@ -42,9 +53,12 @@ def create_research_graph():
     workflow.add_node("direct_answer",direct_answer_node)
     workflow.add_node("finalize",finalize_node)
     workflow.add_node("web_plan",web_plan_node)
+    workflow.add_node("deep_plan",deep_plan_node)
     workflow.add_node("search",search_node)
+    workflow.add_node("deep_search",search_node)
     workflow.add_node("clarify",clarify_node)
     workflow.add_node("writer",writer_node)
+    workflow.add_node("deep_writer",deep_writer_node)
     workflow.add_node("evaluator",evaluator_node)
     workflow.add_node("revise",revise_node)
 
@@ -82,6 +96,9 @@ def create_research_graph():
         if route == "web":
             return "web_plan"
 
+        if route == "deep":
+            return "deep_plan"
+
         # 当前阶段所有路径都进入 direct_answer。
         # 后续会把 agent/web/deep 替换成真正的节点。
         return "direct_answer"
@@ -94,6 +111,7 @@ def create_research_graph():
             "direct_answer": "direct_answer",
             "clarify": "clarify",
             "web_plan": "web_plan",
+            "deep_plan": "deep_plan",
         },
     )
 
@@ -105,8 +123,16 @@ def create_research_graph():
         fan_out_searches,
         ["search"],
     )
+    workflow.add_conditional_edges(
+        "deep_plan",
+        fan_out_deep_searches,
+        ["deep_search"],
+    )
+
     workflow.add_edge("search","writer")
+    workflow.add_edge("deep_search","deep_writer")
     workflow.add_edge("writer","evaluator")
+    workflow.add_edge("deep_writer","evaluator")
     workflow.add_conditional_edges(
         "evaluator",
         evaluation_decision,
@@ -121,12 +147,11 @@ def create_research_graph():
     return workflow.compile()
 
 
-
-def fan_out_searches(
+def _collect_research_queries(
         state: AgentState
-) -> list[Send]:
+) -> list[str]:
     """
-    根据 research_plan 创建并行搜索分支。
+    清理并去重研究查询。
     """
 
     raw_queries = state.get("research_plan") or []
@@ -141,31 +166,68 @@ def fan_out_searches(
             queries.append(query)
             seen.add(query)
 
-
     if not queries:
         user_input = state.get("input","").strip()
-
         if user_input:
             queries = [user_input]
 
     if not queries:
         raise ValueError("没有可分发的搜索查询")
 
+    return queries
+
+
+def _fan_out_to_search_node(
+        state: AgentState,
+        target_node: str,
+) -> list[Send]:
+    """
+    将多个研究查询分发到指定搜索节点。
+    """
+
+    queries = _collect_research_queries(state)
+
     print(
-        "[fan_out_searches]",
+        "[fan_out]",
+        f"target={target_node}",
         f"branches={len(queries)}",
         f"queries={queries}",
     )
 
     return [
         Send(
-            "search",
+            target_node,
             {
                 "query": query,
             },
         )
         for query in queries
     ]
+
+
+def fan_out_searches(
+        state: AgentState
+) -> list[Send]:
+    """
+    Web Research 使用的并行搜索分发。
+    """
+
+    return _fan_out_to_search_node(
+        state,
+        "search",
+    )
+
+
+def fan_out_deep_searches(
+        state: AgentState
+) -> list[Send]:
+    """
+    Deep Research 使用的并行搜索分发。
+    """
+    return _fan_out_to_search_node(
+        state,
+        "deep_search",
+    )
 
 
 
