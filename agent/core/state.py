@@ -217,6 +217,19 @@ class AgentState(TypedDict,total=False):
 
     deepsearch_artifacts: Dict[str,Any]
     deepsearch_mode: str
+
+    #当前是第几轮 Deep Research。
+    deepsearch_epoch: int
+
+    #最多允许执行多少条研究。
+    deepsearch_max_epochs: int
+
+    #已经使用过的查询，用于避免后续轮次重复搜索。
+    deepsearch_query_history: Annotated[
+        List[str],
+        operator.add,
+    ]
+
     deepsearch_tokens_used: int
     deepsearch_elapsed_seconds: float
 

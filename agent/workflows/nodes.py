@@ -144,6 +144,34 @@ def _append_source_references(
     )
 
 
+def _select_deep_search_results(
+    search_results: list[Dict[str, Any]],
+    max_sources: int = 20,
+) -> list[Dict[str,Any]]:
+    """
+    从 Deep Research 的全部结果中选择上下文。
+
+    结果较少时全部保留；
+    结果较多时保留前半部分和最新一轮结果。
+    """
+
+    if max_sources <= 0:
+        return []
+
+    if len(search_results) <= max_sources:
+        return list(search_results)
+
+    head_count = max_sources // 2
+    tail_count = max_sources - head_count
+
+    return (
+        list(search_results[:head_count])
+        + list(search_results[-tail_count:])
+    )
+
+
+
+
 
 def router_node(
     state: AgentState,
@@ -364,6 +392,13 @@ def deep_plan_node(
         queries = [user_input]
         reasoning = "没有生成有效查询，使用用户原始问题搜索。"
 
+
+    max_epochs = max(
+        int(getattr(settings,"deepsearch_max_epochs",3)),
+        1,
+    )
+
+
     print(
         "[deep_plan_node]",
         f"queries={queries}",
@@ -376,6 +411,10 @@ def deep_plan_node(
             int(getattr(settings,"max_revisions",2)),
             0,
         ),
+        "deepsearch_mode": "linear",
+        "deepsearch_epoch": 1,
+        "deepsearch_max_epochs": max_epochs,
+        "deepsearch_query_history": queries,
         "deepsearch_artifacts": {
             "phase": "planned",
             "query_count": len(queries),
@@ -384,6 +423,169 @@ def deep_plan_node(
         "current_step": 1,
         "status": "running",
     }
+
+
+
+def deep_followup_plan_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str,Any]:
+    """
+    根据 Evaluator 发现的知识缺口，生成下一轮研究查询。
+    """
+
+    user_input = state.get("input","").strip()
+
+    if not user_input:
+        raise ValueError("AgentState.input 不能为空")
+
+    missing_topics = [
+        str(item).strip()
+        for item in (state.get("missing_topics") or [])
+        if str(item).strip()
+    ]
+
+    if not missing_topics:
+        evaluation = str(
+            state.get("evaluation","")
+        ).strip()
+
+        missing_topics = [
+            evaluation or "补充验证当前报告中的关键事实"
+        ]
+
+    current_epoch = max(
+        int(state.get("deepsearch_epoch", 1)),
+        1,
+    )
+
+    max_epochs = max(
+        int(getattr(settings,"deepsearch_max_epochs",3)),
+        1,
+    )
+
+    if current_epoch >= max_epochs:
+        raise ValueError("已经达到 Deep Research 的最大轮数")
+
+    max_queries = max(
+        int(getattr(settings,"deepsearch_query_num",5)),
+        1,
+    )
+
+    query_history = {
+        str(item).strip()
+        for item in (state.get("deepsearch_query_history") or [])
+        if str(item).strip()
+    }
+
+    missing_topic_context = "\n".join(
+        f"- {topic}"
+        for topic in missing_topics
+    )
+
+    history_text = "\n".join(
+        f"- {query}"
+        for query in query_history
+    )
+
+    llm = ModelFactory.for_task(
+        "planning",
+        temperature=0.2,
+    )
+
+    messages = [
+        SystemMessage(
+            content=(
+                "你是 PuzzleResearch 的后续研究规划 Agent。"
+                "请根据报告评估器发现的知识缺口，"
+                "生成下一轮用于补充证据的搜索查询。"
+                "查询必须针对缺失主题，不能重复已经使用过的查询。"
+                f"最多生成 {max_queries} 个查询。"
+                "只返回 JSON，不要输出 Markdown 代码块。"
+                "\n\n"
+                "JSON 格式："
+                "\n"
+                "{"
+                '"queries": ["查询一", "查询二"], '
+                '"reasoning": "后续研究原因"'
+                "}"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"用户问题：\n{user_input}\n\n"
+                f"缺失主题：\n{missing_topic_context}\n\n"
+                f"历史查询：\n{history_text}"
+            )
+        ),
+    ]
+
+    candidates: list[str] = []
+    reasoning = ""
+
+    try:
+        response = llm.invoke(
+            messages,
+            config=config,
+        )
+
+        candidates, reasoning = _parse_plan_response(response)
+
+    except Exception as exc:
+        print(f"[deep_followup_plan_node] \n规划失败，使用缺口生成查询：{exc}")
+
+
+    queries: list[str] = []
+
+    for query in candidates:
+        if query not in query_history:
+            queries.append(query)
+
+        if len(queries) >= max_queries:
+            break
+
+
+    if not queries:
+        for topic in missing_topics:
+            fallback_query = (
+                f"{user_input} {topic}"
+            ).strip()
+
+            if fallback_query not in query_history:
+                queries.append(fallback_query)
+
+            if len(queries) >= max_queries:
+                break
+
+    if not queries:
+        raise ValueError(
+            "后续研究没有生成新的查询。"
+        )
+
+    next_epoch = current_epoch + 1
+
+    print(
+        "[deep_followup_plan_node]",
+        f"epoch={next_epoch}"
+        f"queries={queries}",
+        f"reasoning={reasoning}",
+    )
+
+    return {
+        "research_plan": queries,
+        "deepsearch_epoch": next_epoch,
+        "deepsearch_query_history": queries,
+        "deepsearch_artifacts": {
+            "phase": "followup_planned",
+            "epoch": next_epoch,
+            "query_count": len(queries),
+            "missing_topics": missing_topics,
+            "reasoning": reasoning,
+        },
+        "current_step": 2,
+        "status": "running",
+    }
+
 
 
 def search_node(
@@ -586,6 +788,12 @@ def deep_writer_node(
     if not search_results:
         raise ValueError("Deep Writer 没有收到搜索结果")
 
+
+    selected_results = _select_deep_search_results(
+        search_results,
+        max_sources=20,
+    )
+
     context_blocks: list[str] = []
 
     for index,item in enumerate(
@@ -649,7 +857,7 @@ def deep_writer_node(
 
     answer = _append_source_references(
         answer,
-        search_results,
+        selected_results,
         max_sources=20,
     )
 
@@ -661,7 +869,9 @@ def deep_writer_node(
         ],
         "deepsearch_artifacts": {
             "phase": "synthesized",
+            "epoch": state.get("deepsearch_epoch",1),
             "result_count": len(search_results),
+            "context_result_count": len(selected_results),
         },
         "current_step": 3,
         "is_complete": False,
@@ -700,16 +910,20 @@ def evaluator_node(
 
     sources = state.get("sources") or []
 
+
+    if state.get("route") == "deep":
+        source_items = _select_deep_search_results(
+            sources,
+            max_sources=20,
+        )
+    else:
+        source_items = list(sources[:12])
+
     sources_lines: list[str] = []
 
-    source_limit = (
-        20
-        if state.get("route") == "deep"
-        else 12
-    )
 
     for index,source in enumerate(
-        sources[:source_limit],
+        source_items,
         start=1,
     ):
         title = str(source.get("title","")).strip()
@@ -893,15 +1107,17 @@ def revise_node(
 
     context_blocks: list[str] = []
 
-    source_limit = (
-        20
-        if state.get("route") == "deep"
-        else 12
-    )
+    if state.get("route") == "deep":
+        source_items = _select_deep_search_results(
+            search_results,
+            max_sources=20,
+        )
+    else:
+        source_items = list(search_results[:12])
 
-    for index,item in enumerate(
-        search_results[:source_limit],
-        start=1,
+    for index, item in enumerate(
+            source_items,
+            start=1,
     ):
         title = str(item.get("title","")).strip()
         url = str(item.get("url","")).strip()
@@ -969,8 +1185,8 @@ def revise_node(
 
     revised_report = _append_source_references(
         revised_report,
-        search_results,
-        max_sources=source_limit,
+        source_items,
+        max_sources=len(source_items),
     )
 
     print(

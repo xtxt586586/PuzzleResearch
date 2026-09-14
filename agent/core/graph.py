@@ -13,6 +13,7 @@ from agent.workflows.nodes import (
     clarify_node,
     web_plan_node,
     deep_plan_node,
+    deep_followup_plan_node,
     search_node,
     writer_node,
     deep_writer_node,
@@ -25,7 +26,7 @@ def create_research_graph():
     """
     创建 PuzzleResearch 主研究图。
 
-    当前主要路径：
+    主要路径：
 
         router
           ├── direct → direct_answer → finalize
@@ -41,9 +42,13 @@ def create_research_graph():
                  parallel deep_search
                      ↓
                  deep_writer
-
-        web/deep 两条研究路径都会经过：
-        evaluator → revise 或 finalize
+                     ↓
+                 evaluator
+                     ├── pass → finalize
+                     ├── revise → evaluator
+                     └── 缺口且仍有预算
+                         → deep_followup
+                         → deep_search
     """
 
     workflow = StateGraph(AgentState)
@@ -54,6 +59,7 @@ def create_research_graph():
     workflow.add_node("finalize",finalize_node)
     workflow.add_node("web_plan",web_plan_node)
     workflow.add_node("deep_plan",deep_plan_node)
+    workflow.add_node("deep_followup",deep_followup_plan_node)
     workflow.add_node("search",search_node)
     workflow.add_node("deep_search",search_node)
     workflow.add_node("clarify",clarify_node)
@@ -128,6 +134,11 @@ def create_research_graph():
         fan_out_deep_searches,
         ["deep_search"],
     )
+    workflow.add_conditional_edges(
+        "deep_followup",
+        fan_out_deep_searches,
+        ["deep_search"],
+    )
 
     workflow.add_edge("search","writer")
     workflow.add_edge("deep_search","deep_writer")
@@ -137,6 +148,7 @@ def create_research_graph():
         "evaluator",
         evaluation_decision,
         {
+            "deep_followup": "deep_followup",
             "revise": "revise",
             "finalize": "finalize",
         },
@@ -233,7 +245,7 @@ def fan_out_deep_searches(
 
 def evaluation_decision(
         state: AgentState
-) -> Literal["revise","finalize"]:
+) -> Literal["deep_followup","revise","finalize"]:
     """
     根据评估结果决定修订或结束。
 
@@ -246,6 +258,22 @@ def evaluation_decision(
         state.get("verdict","pass")
     ).strip().lower()
 
+
+    route = str(
+        state.get("route","")
+    ).strip().lower()
+
+    deep_epoch = max(
+        int(state.get("deepsearch_epoch", 1)),
+        1,
+    )
+
+    deep_max_epochs = max(
+        int(state.get("deepsearch_max_epochs", 3)),
+        1,
+    )
+
+
     revision_count = int(
         state.get("revision_count", 0)
     )
@@ -254,6 +282,22 @@ def evaluation_decision(
         int(state.get("max_revisions", 2)),
         0,
     )
+
+
+    if (
+        route == "deep"
+        and verdict == "revise"
+        and deep_epoch < deep_max_epochs
+    ):
+        print(
+            "[evaluation_decision]",
+            "route=deep_followup",
+            f"deep_epoch={deep_epoch}",
+            f"deep_max_epochs={deep_max_epochs}",
+        )
+        return "deep_followup"
+
+
 
     if (
         verdict == "revise"
