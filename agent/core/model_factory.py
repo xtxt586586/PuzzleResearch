@@ -14,6 +14,7 @@ TaskType = Literal[
     "writing",
     "evaluation",
     "critic",
+    "clarification"
 ]
 
 
@@ -112,6 +113,9 @@ class ModelFactory:
 
         if task == "critic":
             return settings.critic_model or settings.reasoning_model
+
+        if task == "clarification":
+            return settings.reasoning_model
 
         raise ValueError(f"不支持的任务类型：{task}")
 
