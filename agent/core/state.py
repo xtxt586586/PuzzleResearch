@@ -131,6 +131,13 @@ class AgentState(TypedDict,total=False):
         operator.add,
     ]
 
+    # 搜索节点写入的统一搜索结果。
+    # 使用 operator.add，便于未来并行搜索分支合并结果。
+    search_results: Annotated[
+        List[Dict[str,Any]],
+        operator.add,
+    ]
+
     code_results: Annotated[
         List[Dict[str,Any]],
         operator.add,

@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # 多个搜索引擎使用逗号分隔
     search_engines: str = "tavily,duckduckgo"
 
+    #Web Research 配置
+    web_max_queries: int = 3
+    web_results_per_query: int = 5
+
     # ========== 数据库和缓存 ==========
 
     database_url: str = ""

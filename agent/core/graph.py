@@ -8,6 +8,9 @@ from agent.workflows.nodes import (
     finalize_node,
     router_node,
     clarify_node,
+    web_plan_node,
+    search_node,
+    writer_node,
 )
 
 
@@ -33,7 +36,10 @@ def create_research_graph():
     workflow.add_node("router",router_node)
     workflow.add_node("direct_answer",direct_answer_node)
     workflow.add_node("finalize",finalize_node)
+    workflow.add_node("web_plan",web_plan_node)
+    workflow.add_node("search",search_node)
     workflow.add_node("clarify",clarify_node)
+    workflow.add_node("writer",writer_node)
 
     #设置入口节点
     workflow.set_entry_point("router")
@@ -66,6 +72,9 @@ def create_research_graph():
         if route == "clarify":
             return "clarify"
 
+        if route == "web":
+            return "web_plan"
+
         # 当前阶段所有路径都进入 direct_answer。
         # 后续会把 agent/web/deep 替换成真正的节点。
         return "direct_answer"
@@ -77,12 +86,16 @@ def create_research_graph():
         {
             "direct_answer": "direct_answer",
             "clarify": "clarify",
+            "web_plan": "web_plan",
         },
     )
 
     #添加普通边
     workflow.add_edge("direct_answer","finalize")
     workflow.add_edge("clarify","finalize")
+    workflow.add_edge("web_plan","search")
+    workflow.add_edge("search","writer")
+    workflow.add_edge("writer","finalize")
     workflow.add_edge("finalize",END)
 
     return workflow.compile()

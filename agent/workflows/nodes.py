@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Dict,Any
 
 from langchain_core.messages import AIMessage,HumanMessage,SystemMessage
@@ -8,6 +10,8 @@ from langchain_core.runnables import RunnableConfig
 from agent.core.model_factory import ModelFactory
 from agent.core.state import AgentState
 from agent.core.smart_router import smart_route
+from common.config import settings
+from tools.search import SearchManager
 
 
 def _extract_response_text(response: Any) -> str:
@@ -26,6 +30,80 @@ def _extract_response_text(response: Any) -> str:
         return str(content)
 
     return str(response)
+
+
+def _parse_json_object(content: str) -> Dict[str, Any]:
+    """
+    从模型文本中提取 JSON 对象。
+
+    兼容：
+    1. 纯 JSON；
+    2. Markdown JSON 代码块；
+    3. JSON 前后带少量解释文字。
+    """
+
+    content = content.strip()
+
+    fenced_match = re.search(
+        r"```(?:json)?\s*(\{.*?\})\s*```",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if fenced_match:
+        json_text = fenced_match.group(1)
+    else:
+        start = content.find("{")
+        end = content.rfind("}")
+
+        if start == -1 or end == -1 or start >= end:
+            raise ValueError(
+                f"模型返回中没有找到有效 JSON：{content}"
+            )
+
+        json_text = content[start:end + 1]
+
+    data = json.loads(json_text)
+
+    if not isinstance(data, dict):
+        raise ValueError("模型返回的 JSON 不是对象")
+
+    return data
+
+
+def _parse_plan_response(
+    response: Any,
+) -> tuple[list[str], str]:
+    """
+    解析规划模型返回的查询计划。
+    """
+
+    content = _extract_response_text(response)
+    data = _parse_json_object(content)
+
+    raw_queries = data.get("queries", [])
+
+    if isinstance(raw_queries, str):
+        raw_queries = [raw_queries]
+
+    if not isinstance(raw_queries, list):
+        raw_queries = []
+
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    for item in raw_queries:
+        query = str(item).strip()
+
+        if query and query not in seen:
+            queries.append(query)
+            seen.add(query)
+
+    reasoning = str(
+        data.get("reasoning", "")
+    ).strip()
+
+    return queries, reasoning
 
 
 def router_node(
@@ -53,6 +131,316 @@ def router_node(
     )
 
     return result
+
+
+def web_plan_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str,Any]:
+    """
+    Web Research 规划节点。
+
+    优先使用 Router 提供的 suggested_queries。
+    如果 Router 没有提供查询建议，则调用规划模型生成查询。
+    """
+
+    user_input = state.get("input","").strip()
+
+    if not user_input:
+        raise ValueError("AgentState.input 不能为空")
+
+    max_queries = max(
+        int(getattr(settings,"web_max_queries",3)),
+        1,
+    )
+
+    suggested_queries = state.get("suggested_queries") or []
+
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    for item in suggested_queries:
+        query = str(item).strip()
+
+        if query and query not in seen:
+            queries.append(query)
+            seen.add(query)
+
+    reasoning = ""
+
+    # Router 已经给出搜索建议时，优先复用，减少一次模型调用。
+    if queries:
+        queries = queries[:max_queries]
+        reasoning = "复用 Router 提供的搜索建议。"
+
+    else:
+        llm = ModelFactory.for_task(
+            "planning",
+            temperature=0.2,
+        )
+
+        messages = [
+            SystemMessage(
+                content=(
+                    "你是 PuzzleResearch 的 Web Research Planner。"
+                    "请把用户问题拆解成适合搜索引擎执行的查询词。"
+                    "最多生成 3 个查询。"
+                    "查询应该互补，不要重复。"
+                    "只返回 JSON，不要输出 Markdown 代码块或解释文字。"
+                    "\n\n"
+                    "JSON 格式："
+                    "\n"
+                    "{"
+                    '"queries": ["查询一", "查询二"], '
+                    '"reasoning": "规划原因"'
+                    "}"
+                )
+            ),
+            HumanMessage(
+                content=f"用户问题：\n{user_input}"
+            ),
+        ]
+
+        try:
+            response = llm.invoke(
+                messages,
+                config=config,
+            )
+
+            queries, reasoning = _parse_plan_response(response)
+            queries = queries[:max_queries]
+
+        except Exception as exc:
+            print(f"{web_plan_node}查询规划失败，使用原问题：{exc}")
+            queries = [user_input]
+            reasoning = "规划模型失败，直接使用用户原始问题搜索。"
+
+    if not queries:
+        queries = [user_input]
+        reasoning = "没有生成有效查询，直接使用用户原始问题搜索。"
+
+    print(
+        "[web_plan_node]",
+        f"queries={queries}",
+        f"reasoning={reasoning}",
+    )
+
+    return {
+        "research_plan": queries,
+        "current_step": 1,
+        "status": "running",
+    }
+
+
+def search_node(
+        state: AgentState
+) -> Dict[str,Any]:
+    """
+    执行 Web 搜索，并把结果写入 AgentState。
+    """
+
+    raw_queries = state.get("research_plan") or []
+
+    queries: list[str] = []
+
+    for item in raw_queries:
+        query = str(item).strip()
+
+        if query:
+            queries.append(query)
+
+    if not queries:
+        user_input = state.get("input","").strip()
+
+        if not user_input:
+            raise ValueError("没有可执行的搜索查询")
+
+        queries = [user_input]
+
+    max_results = max(
+        int(getattr(settings,"web_results_per_query",5)),
+        1,
+    )
+
+    manager = SearchManager()
+
+    all_results: list[Dict[str,Any]] = []
+    sources: list[Dict[str,str]] = []
+    errors: list[str] = []
+
+    for query in queries:
+        try:
+            results = manager.search(
+                query,
+                max_results=max_results,
+            )
+
+        except Exception as exc:
+            error_messages = (
+                f"查询「{query}」失败：{exc}"
+            )
+            print(f"[search_node] {error_messages}")
+            errors.append(error_messages)
+            continue
+
+        for item in results:
+            normalized_item = {
+                "query": query,
+                "title": str(item.get("title","")),
+                "url": str(item.get("url","")),
+                "snippet": str(item.get("snippet","")),
+                "content": str(item.get("content","")),
+                "provider": str(item.get("provider","")),
+            }
+
+            all_results.append(normalized_item)
+
+            sources.append(
+                {
+                    "title": normalized_item["title"],
+                    "url": normalized_item["url"],
+                    "provider": normalized_item["provider"],
+                    "query": query,
+                }
+            )
+
+    if not all_results:
+        error_detail = "；".join(errors) or "搜索 Provider 返回空结果"
+
+        raise RuntimeError(
+            f"Web 搜索没有得到任何结果：{error_detail}"
+        )
+
+    print(
+        "[search_node]",
+        f"queries={len(queries)}",
+        f"results={len(all_results)}",
+        f"sources={len(sources)}",
+    )
+
+    update: Dict[str, Any] = {
+        "search_results": all_results,
+        "sources": sources,
+        "current_step": 2,
+        "status": "running",
+    }
+
+    if errors:
+        update["errors"] = errors
+        update["last_error"] = "；".join(errors)
+
+    return update
+
+
+def writer_node(
+        state: AgentState,
+        config: RunnableConfig,
+) -> Dict[str,Any]:
+    """
+    根据搜索结果生成最终研究回答。
+    """
+
+    user_input = state.get("input","").strip()
+    search_results = state.get("search_results") or []
+
+    if not user_input:
+        raise ValueError("AgentState.input 不能为空")
+
+    if not search_results:
+        raise ValueError("Writer 没有收到搜索结果")
+
+    context_blocks: list[str] = []
+
+    for index,item in enumerate(
+        search_results[:12],
+        start=1,
+    ):
+        title = str(item.get("title","")).strip()
+        url = str(item.get("url","")).strip()
+        snippet = str(item.get("snippet","")).strip()
+        content = str(item.get("content","")).strip()
+
+        excerpt = content or snippet
+        excerpt = excerpt[:2000]
+
+        context_blocks.append(
+            f"【来源 {index}】\n"
+            f"标题：{title}\n"
+            f"链接：{url}\n"
+            f"内容：{excerpt}\n"
+        )
+
+    search_context = "\n\n".join(context_blocks)
+
+    llm = ModelFactory.for_task(
+        "writing",
+        temperature=0.4,
+    )
+
+    messages = [
+        SystemMessage(
+            content=(
+                "你是 PuzzleResearch 的 Web Research Writer。"
+                "请根据用户问题和搜索结果撰写准确、清晰的回答。"
+                "只能使用提供的搜索结果，不要编造来源或事实。"
+                "引用来源时使用 [来源1]、[来源2] 这样的格式。"
+                "如果不同来源的信息存在冲突，请明确指出。"
+                "回答应直接解决用户问题，不要描述内部工作流程。"
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"用户问题：\n{user_input}\n"
+                f"搜索结果：\n{search_context}\n"
+            )
+        ),
+    ]
+
+    response = llm.invoke(
+        messages,
+        config=config,
+    )
+
+    answer = _extract_response_text(response).strip()
+
+    if not answer:
+        raise ValueError("Writer 模型返回了空回答")
+
+    reference_lines: list[str] = []
+    seen_urls: set[str] = set()
+
+    for index,item in enumerate(
+        search_results[:12],
+        start=1,
+    ):
+        title = str(item.get("title","")).strip()
+        url = str(item.get("url","")).strip()
+
+        if not url or url in seen_urls:
+            continue
+
+        reference_lines.append(
+            f"[来源 {index}] {title}:{url}\n"
+        )
+        seen_urls.add(url)
+
+    if reference_lines:
+        answer += (
+            "\n\n参考来源：\n"
+            + "\n".join(reference_lines)
+        )
+
+    return {
+        "draft_report": answer,
+        "final_report": answer,
+        "messages": [
+            AIMessage(content=answer)
+        ],
+        "current_step": 3,
+        "is_complete": False,
+        "status": "running",
+    }
+
 
 
 def clarify_node(
