@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from agent.core.graph import (
     create_research_graph,
@@ -184,8 +186,7 @@ class CoreContractTests(unittest.TestCase):
         graph = create_research_graph()
         self.assertIsNotNone(graph.get_graph())
 
-
-    def test_graph_pauses_when_tool_approval_is_enabled(self):
+    def test_graph_pauses_and_resumes_tool_approval(self):
         class FakePlanningModel:
             def invoke(self, messages, config=None):
                 return type(
@@ -201,28 +202,80 @@ class CoreContractTests(unittest.TestCase):
                     },
                 )()
 
+        checkpointer = InMemorySaver()
+
+        graph = create_research_graph(
+            checkpointer=checkpointer,
+        )
+
+        config = {
+            "configurable": {
+                "thread_id": "approval-test-001",
+            }
+        }
+
         with patch.object(
-            settings,
-            "tool_approval",
-            True,
+                settings,
+                "tool_approval",
+                True,
         ), patch(
             "agent.workflows.nodes.ModelFactory.for_task",
             return_value=FakePlanningModel(),
         ):
-            result = create_research_graph().invoke(
+            paused_result = graph.invoke(
                 {
                     "input": "请执行 Python 代码",
                     "messages": [],
-                }
+                },
+                config=config,
             )
 
-        self.assertEqual(result["route"], "agent")
-        self.assertEqual(result["status"], "paused")
-        self.assertFalse(result["is_complete"])
+            self.assertIn(
+                "__interrupt__",
+                paused_result,
+            )
+            self.assertEqual(
+                paused_result.get("status"),
+                "paused",
+            )
+            self.assertFalse(
+                paused_result.get("is_complete")
+            )
+            self.assertEqual(
+                paused_result.get("tool_results", []),
+                [],
+            )
+
+            resumed_result = graph.invoke(
+                Command(
+                    resume={
+                        "approved": True,
+                    }
+                ),
+                config=config,
+            )
+
         self.assertEqual(
-            len(result["pending_tool_calls"]),
-            1,
+            resumed_result["status"],
+            "completed",
         )
+        self.assertTrue(
+            resumed_result["is_complete"]
+        )
+        self.assertEqual(
+            resumed_result["tool_results"][0]["result"]["output"].strip(),
+            "5",
+        )
+
+
+    def test_graph_compiles_with_memory_checkpointer(self):
+        checkpointer = InMemorySaver()
+
+        graph = create_research_graph(
+            checkpointer=checkpointer,
+        )
+
+        self.assertIsNotNone(graph.get_graph())
 
 
 if __name__ == "__main__":

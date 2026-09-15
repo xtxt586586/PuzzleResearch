@@ -20,10 +20,11 @@ from agent.workflows.nodes import (
     evaluator_node,
     revise_node,
     agent_tool_node,
+    agent_plan_node,
 )
 
 
-def create_research_graph():
+def create_research_graph(checkpointer=None):
     """
     创建 PuzzleResearch 主研究图。
 
@@ -69,6 +70,7 @@ def create_research_graph():
     workflow.add_node("deep_writer",deep_writer_node)
     workflow.add_node("evaluator",evaluator_node)
     workflow.add_node("revise",revise_node)
+    workflow.add_node("agent_plan",agent_plan_node)
 
     #设置入口节点
     workflow.set_entry_point("router")
@@ -105,7 +107,7 @@ def create_research_graph():
             return "deep_plan"
 
         if route == "agent":
-            return "agent_tool"
+            return "agent_plan"
 
         return "direct_answer"
 
@@ -118,13 +120,14 @@ def create_research_graph():
             "clarify": "clarify",
             "web_plan": "web_plan",
             "deep_plan": "deep_plan",
-            "agent_tool": "agent_tool",
+            "agent_plan": "agent_plan",
         },
     )
 
     #添加普通边
     workflow.add_edge("direct_answer","finalize")
     workflow.add_edge("clarify","finalize")
+    workflow.add_edge("agent_plan", "agent_tool")
     workflow.add_edge("agent_tool", "finalize")
     workflow.add_conditional_edges(
         "web_plan",
@@ -158,8 +161,12 @@ def create_research_graph():
     workflow.add_edge("revise","evaluator")
     workflow.add_edge("finalize",END)
 
-    return workflow.compile()
+    compile_kwargs = {}
 
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+
+    return workflow.compile(**compile_kwargs)
 
 def _collect_research_queries(
         state: AgentState
