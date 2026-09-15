@@ -12,6 +12,7 @@ from agent.core.state import AgentState,QueryState
 from agent.core.smart_router import smart_route
 from common.config import settings
 from tools.search import SearchManager
+from tools.builtin import create_default_registry
 
 
 def _extract_response_text(response: Any) -> str:
@@ -1305,23 +1306,274 @@ def clarify_node(
     }
 
 
-def agent_unavailable_node(
-    state: AgentState,
-) -> Dict[str, Any]:
-    """在工具执行节点接入前，明确告知用户当前能力边界。"""
+def agent_tool_node(
+        state: AgentState,
+        config: RunnableConfig,
+) -> Dict[str,Any]:
+    """
+    Agent 工具调用节点。
 
-    message = (
-        "已识别为需要工具执行的任务，但当前版本尚未接入 Agent 工具执行节点。"
-        "工具执行能力将在后续阶段启用。"
+    当前支持：
+    - 由模型规划工具调用；
+    - 检查工具白名单；
+    - 检查调用次数限制；
+    - 可选人工审批；
+    - 调用 ToolRegistry；
+    - 保存工具执行结果。
+    """
+
+    user_input = state.get("input","").strip()
+
+    if not user_input:
+        raise ValueError("Agent 工具节点缺少用户输入。")
+
+    tool_call_count = max(
+        int(state.get("tool_call_count", 0)),
+        0
     )
 
-    return {
-        "draft_report": message,
-        "final_report": message,
-        "messages": [AIMessage(content=message)],
-        "is_complete": False,
-        "status": "paused",
+    tool_call_limit = max(
+        int(
+            state.get(
+                "tool_call_limit",
+                getattr(settings,"tool_call_limit",20)
+            )
+        ),
+        0,
+    )
+
+    if tool_call_count >= tool_call_limit:
+        message = (
+            f"工具调用次数已达到限制： {tool_call_limit}"
+        )
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
+    registry = create_default_registry()
+
+    enabled_tools = state.get("enabled_tools")
+
+    planner_messages = [
+        SystemMessage(
+            content=(
+                "你是 PuzzleResearch 的工具调用规划器。"
+                "请根据用户请求选择合适的工具。"
+                "当前只允许使用 python_executor。"
+                "python_executor 用于执行 Python 代码。"
+                "请把需要执行的完整代码放入 arguments.code。"
+                "只能返回 JSON，不要输出 Markdown 代码块或解释文字。"
+                "\n\n"
+                "JSON 格式："
+                "\n"
+                "{"
+                '"tool_name": "python_executor", '
+                '"arguments": {'
+                '"code": "print(2 + 3)"'
+                "}"
+                "}"
+            )
+        ),
+        HumanMessage(
+            content=f"用户请求：\n{user_input}"
+        ),
+    ]
+
+    try:
+        llm = ModelFactory.for_task(
+            "planning",
+            temperature=0.0,
+        )
+
+        response = llm.invoke(
+            planner_messages,
+            config=config,
+        )
+
+        data = _parse_json_object(
+            _extract_response_text(response)
+        )
+
+        tool_name = str(
+            data.get("tool_name","")
+        ).strip()
+
+        arguments = data.get("arguments", {})
+
+        if not tool_name:
+            raise ValueError("工具规划结果缺少 tool_name")
+
+        if not isinstance(arguments,dict):
+            raise ValueError("工具规划结果 arguments 必须是 JSON 对象")
+
+    except Exception as exc:
+        message = f"工具调用规划失败： {exc}"
+
+        print(f"{agent_tool_node} {message}")
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
+    if enabled_tools is not None and not enabled_tools.get(
+        tool_name,
+        False,
+    ):
+        message = f"工具未启用：{tool_name}"
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
+    try:
+        tool = registry.get(
+            tool_name
+        )
+    except KeyError as exc:
+        message = str(exc)
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
+    pending_all = {
+        "tool_name": tool.name,
+        "arguments": arguments,
     }
+
+    tool_approval_enabled = bool(
+        getattr(settings,"tool_approval",False)
+    )
+
+    if (
+        tool_approval_enabled
+        and not state.get("tool_approved", False)
+    ):
+        message = (
+            f"工具调用等待人工审批：{tool_name}"
+        )
+
+        return {
+            "pending_tool_calls": [pending_all],
+            "final_report": message,
+            "is_complete": False,
+            "status": "paused",
+        }
+
+    try:
+        tool_result = registry.invoke(
+            tool_name,
+            arguments,
+        )
+    except Exception as exc:
+        message = (
+            f"工具「{tool_name}」执行失败：{exc}"
+        )
+
+        print(f"{agent_tool_node} {message}")
+
+        return {
+            "tool_results": [
+                {
+                    **pending_all,
+                    "result": {
+                        "error": str(exc),
+                    },
+                }
+            ],
+            "tool_call_count": tool_call_count + 1,
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
+    result_error = ""
+
+    if isinstance(tool_result,dict):
+        result_error = str(
+            tool_result.get("error","")
+        ).strip()
+
+    if isinstance(tool_result,dict):
+        output = str(
+            tool_result.get("output","")
+        ).strip()
+
+        if not output:
+            output = "(工具没有产生标准输出)"
+
+        report = (
+            f"工具「{tool_name}」执行结果：\n"
+            f"{output}"
+        )
+
+        if result_error:
+            report += (
+                "\n\n错误信息： \n"
+                f"{result_error}"
+            )
+
+    else:
+        report = (
+            f"工具「{tool_name}」执行结果：\n"
+            f"{tool_result}"
+        )
+
+    tool_record = {
+        **pending_all,
+        "result": tool_result,
+    }
+
+    result_state: Dict[str, Any] = {
+        "tool_results": [tool_record],
+        "tool_call_count": tool_call_count + 1,
+        "final_report": report,
+        "draft_report": report,
+        "messages": [
+            AIMessage(content=report)
+        ],
+        "is_complete": False,
+        "status": "running",
+    }
+
+    if result_error:
+        result_state.update(
+            {
+                "errors": [result_error],
+                "last_error": result_error,
+                "status": "failed",
+            }
+        )
+
+    print(
+        "[agent_tool_node]",
+        f"tool={tool_name}",
+        f"call_count={tool_call_count + 1}",
+        f"has_error={bool(result_error)}",
+    )
+
+    return result_state
+
+
 
 
 def direct_answer_node(
@@ -1388,11 +1640,20 @@ def finalize_node(
     """
     report = state.get("final_report") or state.get("draft_report","")
 
+    current_status = state.get("status")
+
     is_paused = (
-        state.get("status") == "paused"
+        current_status == "paused"
         or state.get("route") == "clarify"
         or bool(state.get("needs_clarification"))
     )
+
+    if current_status == "failed":
+        return {
+            "final_report": report,
+            "is_complete": False,
+            "status": "failed",
+        }
 
     return {
         "final_report": report,

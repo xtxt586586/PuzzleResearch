@@ -196,6 +196,11 @@ class AgentState(TypedDict,total=False):
     tool_call_limit: int
     enabled_tools: Dict[str,bool]
 
+    tool_results: Annotated[
+        List[Dict[str,Any]],
+        operator.add,
+    ]
+
     # ========== 取消和错误 ==========
 
     cancel_token_id: Optional[str]

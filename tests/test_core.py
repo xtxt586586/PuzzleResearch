@@ -13,7 +13,7 @@ from agent.core.state import capped_add_messages, merge_unique_items
 from agent.workflows.nodes import (
     _parse_json_object,
     _parse_plan_response,
-    agent_unavailable_node,
+    agent_tool_node,
     finalize_node,
 )
 from common.config import settings
@@ -140,21 +140,45 @@ class CoreContractTests(unittest.TestCase):
         self.assertFalse(result["is_complete"])
         self.assertEqual(result["status"], "paused")
 
-    def test_agent_route_reports_unavailable_capability(self):
-        result = agent_unavailable_node({"route": "agent"})
 
-        self.assertFalse(result["is_complete"])
-        self.assertEqual(result["status"], "paused")
-        self.assertIn("尚未接入", result["final_report"])
+    def test_graph_routes_agent_request_to_tool_node(self):
+        class FakePlanningModel:
+            def invoke(self, messages, config=None):
+                return type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "content": (
+                            '{"tool_name": "python_executor", '
+                            '"arguments": {'
+                            '"code": "print(2 + 3)"'
+                            "}}"
+                        )
+                    },
+                )()
 
-    def test_graph_routes_agent_request_to_paused_boundary(self):
-        result = create_research_graph().invoke(
-            {"input": "请执行 Python 代码", "messages": []}
-        )
+        with patch(
+                "agent.workflows.nodes.ModelFactory.for_task",
+                return_value=FakePlanningModel(),
+        ):
+            result = create_research_graph().invoke(
+                {
+                    "input": "请执行 Python 代码",
+                    "messages": [],
+                }
+            )
 
         self.assertEqual(result["route"], "agent")
-        self.assertEqual(result["status"], "paused")
-        self.assertFalse(result["is_complete"])
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["is_complete"])
+        self.assertEqual(
+            result["tool_results"][0]["tool_name"],
+            "python_executor",
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"].strip(),
+            "5",
+        )
 
     def test_graph_compiles(self):
         graph = create_research_graph()

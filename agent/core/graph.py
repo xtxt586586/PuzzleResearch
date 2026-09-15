@@ -19,7 +19,7 @@ from agent.workflows.nodes import (
     deep_writer_node,
     evaluator_node,
     revise_node,
-    agent_unavailable_node,
+    agent_tool_node,
 )
 
 
@@ -64,7 +64,7 @@ def create_research_graph():
     workflow.add_node("search",search_node)
     workflow.add_node("deep_search",search_node)
     workflow.add_node("clarify",clarify_node)
-    workflow.add_node("agent_unavailable", agent_unavailable_node)
+    workflow.add_node("agent_tool",agent_tool_node)
     workflow.add_node("writer",writer_node)
     workflow.add_node("deep_writer",deep_writer_node)
     workflow.add_node("evaluator",evaluator_node)
@@ -105,7 +105,7 @@ def create_research_graph():
             return "deep_plan"
 
         if route == "agent":
-            return "agent_unavailable"
+            return "agent_tool"
 
         return "direct_answer"
 
@@ -118,14 +118,14 @@ def create_research_graph():
             "clarify": "clarify",
             "web_plan": "web_plan",
             "deep_plan": "deep_plan",
-            "agent_unavailable": "agent_unavailable",
+            "agent_tool": "agent_tool",
         },
     )
 
     #添加普通边
     workflow.add_edge("direct_answer","finalize")
     workflow.add_edge("clarify","finalize")
-    workflow.add_edge("agent_unavailable", "finalize")
+    workflow.add_edge("agent_tool", "finalize")
     workflow.add_conditional_edges(
         "web_plan",
         fan_out_searches,
