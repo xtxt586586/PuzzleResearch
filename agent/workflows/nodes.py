@@ -1477,6 +1477,7 @@ def agent_tool_node(
 
         return {
             "pending_tool_calls": [pending_all],
+            "tool_call_count": tool_call_count,
             "final_report": message,
             "is_complete": False,
             "status": "paused",

@@ -116,6 +116,11 @@ class AgentToolNodeTests(unittest.TestCase):
                 config={},
             )
 
+        self.assertEqual(
+            result.get("tool_call_count"),
+            0,
+        )
+
         self.assertEqual(result["status"], "paused")
         self.assertFalse(result["is_complete"])
         self.assertEqual(
@@ -149,8 +154,6 @@ class AgentToolNodeTests(unittest.TestCase):
             result["tool_results"][0]["result"]["output"].strip(),
             "42",
         )
-
-
 
 
 if __name__ == "__main__":
