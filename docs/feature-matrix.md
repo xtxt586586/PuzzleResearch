@@ -82,7 +82,7 @@
 ## 六、Agent 工具系统
 
 - [x] Tool Registry
-- [ ] 动态工具装配
+- [x] 动态工具装配
 - [ ] Agent Profile
 - [x] 工具白名单
 - [ ] 工具黑名单

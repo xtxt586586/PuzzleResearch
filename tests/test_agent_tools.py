@@ -5,6 +5,7 @@ from agent.workflows.nodes import (
     agent_plan_node,
     agent_tool_node,
 )
+from tools.registry import ToolDefinition, ToolRegistry
 
 
 class FakePlanningModel:
@@ -166,6 +167,95 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertEqual(
             result["pending_tool_calls"][0]["tool_name"],
             "python_executor",
+        )
+
+    def test_custom_tool_registry_is_used_for_plan_and_execution(self):
+        def echo_tool(text: str) -> dict[str, str]:
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        model = FakePlanningModel(
+            '{"tool_name": "echo", '
+            '"arguments": {"text": "hello"}}'
+        )
+
+        tool_config = {
+            "configurable": {
+                "tool_registry": registry,
+            }
+        }
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            plan_result = agent_plan_node(
+                {
+                    "input": "请返回 hello",
+                },
+                config=tool_config,
+            )
+
+        self.assertEqual(
+            plan_result["pending_tool_calls"][0]["tool_name"],
+            "echo",
+        )
+
+        execution_result = agent_tool_node(
+            {
+                "pending_tool_calls": plan_result["pending_tool_calls"],
+                "tool_approved": True,
+            },
+            config=tool_config,
+        )
+
+        self.assertEqual(
+            execution_result["status"],
+            "running",
+        )
+        self.assertEqual(
+            execution_result["tool_results"][0]["result"]["output"],
+            "hello",
+        )
+
+    def test_invalid_tool_registry_is_rejected(self):
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "python_executor",
+                        "arguments": {
+                            "code": "print(1)",
+                        },
+                    }
+                ],
+            },
+            config={
+                "configurable": {
+                    "tool_registry": object(),
+                }
+            },
+        )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "ToolRegistry",
+            result["final_report"],
         )
 
 

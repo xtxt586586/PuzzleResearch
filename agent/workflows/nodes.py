@@ -13,6 +13,7 @@ from agent.core.state import AgentState,QueryState
 from agent.core.smart_router import smart_route
 from common.config import settings
 from tools.search import SearchManager
+from tools.registry import ToolRegistry
 from tools.builtin import create_default_registry
 
 
@@ -1308,6 +1309,36 @@ def clarify_node(
 
 
 
+def _get_agent_tool_registry(
+        config: RunnableConfig,
+) -> ToolRegistry:
+    """
+    获取当前 Agent 使用的工具注册表。
+
+    未注入自定义注册表时，使用默认工具注册表。
+    """
+
+    configurable = {}
+
+    if config:
+        configurable = config.get(
+            "configurable",
+            {},
+        ) or {}
+
+    registry = configurable.get("tool_registry")
+
+    if registry is None:
+        return create_default_registry()
+
+    if not isinstance(registry, ToolRegistry):
+        raise TypeError(
+            "configurable.tool_registry 必须是 ToolRegistry。"
+        )
+
+    return registry
+
+
 
 def agent_plan_node(
         state: AgentState,
@@ -1350,29 +1381,53 @@ def agent_plan_node(
             "status": "failed",
         }
 
-    enabled_tools = state.get(
-        "enabled_tools",
-        {
-            "python_executor": True,
+    try:
+        registry = _get_agent_tool_registry(config)
+    except TypeError as exc:
+        message = f"工具注册表配置无效: {exc}"
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
         }
+
+    available_tools = registry.list_tools()
+
+
+
+    enabled_tools = state.get(
+        "enabled_tools"
+    )
+
+    if enabled_tools is None:
+        enabled_tools = {
+            tool.name: True
+            for tool in available_tools
+        }
+
+    tool_descriptions = "\n".join(
+        f"- {tool.name}: {tool.description}"
+        for tool in available_tools
     )
 
     planner_messages = [
         SystemMessage(
             content=(
                 "你是 PuzzleResearch 的工具调用规划器。"
-                "请根据用户请求选择合适的工具。"
-                "当前只允许使用 python_executor。"
-                "请把需要执行的完整代码放入 arguments.code。"
+                "请根据用户请求，从当前可用工具中选择一个工具。"
+                "不要选择不在工具列表中的工具。"
+                f"\n当前可用工具：\n{tool_descriptions}\n"
+                "请把工具参数放入 arguments。"
                 "只能返回 JSON，不要输出 Markdown 代码块或解释文字。"
                 "\n\n"
                 "JSON 格式："
                 "\n"
                 "{"
-                '"tool_name": "python_executor", '
-                '"arguments": {'
-                '"code": "print(2 + 3)"'
-                "}"
+                '"tool_name": "工具名称", '
+                '"arguments": {"参数名": "参数值"}'
                 "}"
             )
         ),
@@ -1432,8 +1487,6 @@ def agent_plan_node(
             "is_complete": False,
             "status": "failed",
         }
-
-    registry = create_default_registry()
 
     try:
         tool = registry.get(tool_name)
@@ -1536,11 +1589,10 @@ def agent_tool_node(
             "status": "failed",
         }
 
-    registry = create_default_registry()
-
     try:
+        registry = _get_agent_tool_registry(config)
         tool = registry.get(tool_name)
-    except KeyError as exc:
+    except (KeyError,TypeError) as exc:
         message = str(exc)
 
         return {
