@@ -1357,7 +1357,12 @@ def agent_tool_node(
 
     registry = create_default_registry()
 
-    enabled_tools = state.get("enabled_tools")
+    enabled_tools = state.get(
+        "enabled_tools",
+        {
+            "python_executor": True,
+        },
+    )
 
     planner_messages = [
         SystemMessage(

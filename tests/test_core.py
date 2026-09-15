@@ -185,5 +185,45 @@ class CoreContractTests(unittest.TestCase):
         self.assertIsNotNone(graph.get_graph())
 
 
+    def test_graph_pauses_when_tool_approval_is_enabled(self):
+        class FakePlanningModel:
+            def invoke(self, messages, config=None):
+                return type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "content": (
+                            '{"tool_name": "python_executor", '
+                            '"arguments": {'
+                            '"code": "print(2 + 3)"'
+                            "}}"
+                        )
+                    },
+                )()
+
+        with patch.object(
+            settings,
+            "tool_approval",
+            True,
+        ), patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=FakePlanningModel(),
+        ):
+            result = create_research_graph().invoke(
+                {
+                    "input": "请执行 Python 代码",
+                    "messages": [],
+                }
+            )
+
+        self.assertEqual(result["route"], "agent")
+        self.assertEqual(result["status"], "paused")
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(
+            len(result["pending_tool_calls"]),
+            1,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

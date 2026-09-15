@@ -127,6 +127,31 @@ class AgentToolNodeTests(unittest.TestCase):
             "python_executor",
         )
 
+    def test_default_enabled_tools_allow_registered_tool(self):
+        model = FakePlanningModel(
+            '{"tool_name": "python_executor", '
+            '"arguments": {"code": "print(42)"}}'
+        )
+
+        with patch(
+                "agent.workflows.nodes.ModelFactory.for_task",
+                return_value=model,
+        ):
+            result = agent_tool_node(
+                {
+                    "input": "请执行 Python 代码",
+                },
+                config={},
+            )
+
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"].strip(),
+            "42",
+        )
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
