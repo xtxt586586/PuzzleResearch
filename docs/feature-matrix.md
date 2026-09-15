@@ -81,23 +81,23 @@
 
 ## 六、Agent 工具系统
 
-- [ ] Tool Registry
+- [x] Tool Registry
 - [ ] 动态工具装配
 - [ ] Agent Profile
-- [ ] 工具白名单
+- [x] 工具白名单
 - [ ] 工具黑名单
 - [ ] 工具去重
 - [ ] 工具事件包装
 - [ ] 工具选择器
 - [ ] 工具重试
-- [ ] 工具调用限制
+- [x] 工具调用限制
 - [ ] 上下文清理
 - [ ] Todo List
-- [ ] 工具人工审批
+- [x] 工具人工审批
 
 ## 七、代码和浏览器
 
-- [ ] Python 代码执行
+- [x] Python 代码执行
 - [ ] Docker 沙箱
 - [ ] E2B 沙箱适配
 - [ ] Playwright 浏览器
@@ -139,14 +139,14 @@
 
 ## 十、会话和人工介入
 
-- [ ] MemorySaver
+- [x] InMemorySaver（开发/测试）
 - [ ] PostgreSQL Checkpointer
 - [ ] Redis Store
 - [ ] 计划审核
 - [ ] 来源审核
 - [ ] 草稿审核
 - [ ] 最终报告审核
-- [ ] 中断恢复
+- [x] 工具审批中断恢复
 - [ ] 任务取消
 - [ ] 会话列表
 - [ ] 会话权限隔离

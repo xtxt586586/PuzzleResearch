@@ -55,7 +55,6 @@ PuzzleResearch 是一个基于 LangGraph 的全功能 AI Agent 研究平台。
 
 ## 开发状态
 
-## 开发状态
 
 当前阶段：阶段 14 已完成，已具备路由、Web Research、Deep Research、评估修订和 Agent 工具调用主流程。
 
