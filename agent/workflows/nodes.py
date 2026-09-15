@@ -1739,9 +1739,11 @@ def finalize_node(
     """
     结束节点。
 
-    当前阶段暂时负责把报告标记为完成。
-    后续会替换成完整的 human_review_node，
-    负责人工审核、中断和恢复。
+    根据当前状态保留失败、取消和暂停语义，
+    并将正常完成的执行标记为 completed。
+
+    工具审批的 interrupt/resume 由 agent_tool_node 负责；
+    本节点暂不负责完整的 human review 流程。
     """
     report = state.get("final_report") or state.get("draft_report","")
 

@@ -28,7 +28,7 @@ def create_research_graph(checkpointer=None):
     """
     创建 PuzzleResearch 主研究图。
 
-    主要路径：
+        主要路径：
 
         router
           ├── direct → direct_answer → finalize
@@ -39,18 +39,17 @@ def create_research_graph(checkpointer=None):
           │          ↓
           │        writer
           │
-          └── deep → deep_plan
-                     ↓
-                 parallel deep_search
-                     ↓
-                 deep_writer
-                     ↓
-                 evaluator
-                     ├── pass → finalize
-                     ├── revise → evaluator
-                     └── 缺口且仍有预算
-                         → deep_followup
-                         → deep_search
+          ├── deep → deep_plan
+          │          ↓
+          │      parallel deep_search
+          │          ↓
+          │        deep_writer
+          │          ↓
+          │        evaluator
+          │
+          └── agent → agent_plan → agent_tool → finalize
+                                  ↑
+                            可选 interrupt/resume
     """
 
     workflow = StateGraph(AgentState)
@@ -79,9 +78,10 @@ def create_research_graph(checkpointer=None):
         """
         根据 Router 写入的 route 字段选择下一个节点。
 
-        direct、clarify、web 和 deep 路径进入各自节点。
-        agent 路径当前进入能力边界提示节点，
-        因为工具执行节点尚未接入。
+        direct、clarify、web、deep 和 agent 路径进入各自节点。
+        agent 路径先由 agent_plan 生成工具调用计划，
+        再由 agent_tool 执行工具。
+        启用工具审批时，会在执行前通过 interrupt 暂停。
         """
 
         route = state.get("route", "clarify")
