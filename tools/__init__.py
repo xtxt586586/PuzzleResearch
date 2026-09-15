@@ -1,3 +1,7 @@
+from tools.builtin import (
+    create_default_registry,
+    execute_python_tool,
+)
 from tools.python_executor import (
     PythonExecutionResult,
     PythonExecutor,
@@ -9,4 +13,6 @@ __all__ = [
     "PythonExecutor",
     "ToolDefinition",
     "ToolRegistry",
+    "create_default_registry",
+    "execute_python_tool",
 ]
