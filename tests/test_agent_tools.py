@@ -6,6 +6,7 @@ from agent.workflows.nodes import (
     agent_tool_node,
 )
 from tools.registry import ToolDefinition, ToolRegistry
+from agent.core.profile import AgentProfile
 
 
 class FakePlanningModel:
@@ -256,6 +257,103 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertIn(
             "ToolRegistry",
             result["final_report"],
+        )
+
+    def test_profile_restricts_enabled_tools(self):
+        model = FakePlanningModel(
+            '{"tool_name": "python_executor", '
+            '"arguments": {"code": "print(42)"}}'
+        )
+
+        profile = AgentProfile(
+            name="echo-only",
+            enabled_tools=frozenset({"echo"}),
+        )
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = agent_plan_node(
+                {
+                    "input": "请执行 Python 代码",
+                },
+                config={
+                    "configurable": {
+                        "agent_profile": profile,
+                    }
+                },
+            )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "工具未启用",
+            result["final_report"],
+        )
+
+    def test_profile_overrides_tool_call_limit(self):
+        profile = AgentProfile(
+            name="one-call-only",
+            tool_call_limit=1,
+        )
+
+        result = agent_plan_node(
+            {
+                "input": "请执行 Python 代码",
+                "tool_call_count": 1,
+                "tool_call_limit": 20,
+            },
+            config={
+                "configurable": {
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "达到限制",
+            result["final_report"],
+        )
+
+    def test_profile_enables_tool_approval(self):
+        model = FakePlanningModel(
+            '{"tool_name": "python_executor", '
+            '"arguments": {"code": "print(42)"}}'
+        )
+
+        profile = AgentProfile(
+            name="approval-required",
+            require_tool_approval=True,
+        )
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = agent_plan_node(
+                {
+                    "input": "请执行 Python 代码",
+                },
+                config={
+                    "configurable": {
+                        "agent_profile": profile,
+                    }
+                },
+            )
+
+        self.assertEqual(
+            result["status"],
+            "paused",
+        )
+        self.assertFalse(
+            result["is_complete"],
         )
 
 

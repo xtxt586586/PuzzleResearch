@@ -129,3 +129,23 @@ agent_plan
 agent_tool
     ├── 继续规划 → agent_plan
     └── 完成/失败/达到上限 → finalize
+
+### 阶段 17：Agent Profile
+
+状态：已完成
+
+掌握内容：
+
+- 使用不可变数据类定义 AgentProfile
+- 通过 RunnableConfig 注入 Agent Profile
+- 使用 Profile 集中管理工具白名单
+- 使用 Profile 覆盖工具调用次数限制
+- 使用 Profile 覆盖工具审批策略
+- 将运行时策略与 AgentState 持久化状态分离
+- 为 Profile 的工具限制、调用上限和审批策略增加回归测试
+
+配置优先级：
+
+- Agent Profile 中明确设置的策略优先；
+- 未设置的 Profile 字段回退到 AgentState；
+- AgentState 未设置时回退到全局 Settings。

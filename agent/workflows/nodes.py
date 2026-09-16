@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableConfig
 
 from agent.core.model_factory import ModelFactory
 from agent.core.state import AgentState,QueryState
+from agent.core.profile import AgentProfile
 from agent.core.smart_router import smart_route
 from common.config import settings
 from tools.search import SearchManager
@@ -1309,6 +1310,38 @@ def clarify_node(
 
 
 
+def _get_agent_profile(
+        config: RunnableConfig,
+) -> AgentProfile | None:
+    """
+    获取当前 Agent 的运行 Profile。
+
+    没有注入 Profile 时返回 None，
+    由旧的 state/config 默认逻辑继续生效。
+    """
+
+    configurable = {}
+
+    if config:
+        configurable = config.get(
+            "configurable",
+            {},
+        ) or {}
+
+    profile = configurable.get("agent_profile")
+
+    if profile is None:
+        return None
+
+    if not isinstance(profile, AgentProfile):
+        raise TypeError(
+            "configurable.agent_profile 必须是 AgentProfile。"
+        )
+
+    return profile
+
+
+
 def _get_agent_tool_registry(
         config: RunnableConfig,
 ) -> ToolRegistry:
@@ -1355,18 +1388,38 @@ def agent_plan_node(
     if not user_input:
         raise ValueError("Agent 工具规划节点缺少用户输入。")
 
+
+    try:
+        profile = _get_agent_profile(config)
+    except TypeError as exc:
+        message = f"Agent Profile 配置无效: {exc}"
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
     tool_call_count = max(
         int(state.get("tool_call_count", 0)),
         0
     )
 
+    configured_tool_call_limit = (
+        profile.tool_call_limit
+        if profile is not None
+        and profile.tool_call_limit is not None
+        else state.get(
+            "tool_call_limit",
+            getattr(settings,"tool_call_limit",20),
+        )
+    )
+
+
     tool_call_limit = max(
-        int(
-            state.get(
-                "tool_call_limit",
-                getattr(settings,"tool_call_limit",20)
-            )
-        ),
+        int(configured_tool_call_limit),
         0,
     )
 
@@ -1396,17 +1449,24 @@ def agent_plan_node(
 
     available_tools = registry.list_tools()
 
+    state_enabled_tools = state.get("enabled_tools")
 
-
-    enabled_tools = state.get(
-        "enabled_tools"
-    )
-
-    if enabled_tools is None:
+    if (
+        profile is not None
+        and profile.enabled_tools is not None
+    ):
+        enabled_tools = {
+            tool.name: tool.name in profile.enabled_tools
+            for tool in available_tools
+        }
+    elif state_enabled_tools is None:
         enabled_tools = {
             tool.name: True
             for tool in available_tools
         }
+    else:
+        enabled_tools = state_enabled_tools
+
 
     tool_descriptions = "\n".join(
         f"- {tool.name}: {tool.description}"
@@ -1561,14 +1621,28 @@ def agent_plan_node(
         "arguments": arguments,
     }
 
-    approval_required = bool(
-        getattr(settings, "tool_approval", False)
-    ) and not state.get("tool_approved", False)
+    approval_enabled = (
+        profile.require_tool_approval
+        if (
+            profile is not None
+            and profile.require_tool_approval is not None
+        )
+        else bool(
+            getattr(settings, "tool_approval", False)
+        )
+    )
+
+
+    approval_required = (
+        approval_enabled
+        and not state.get("tool_approved", False)
+    )
 
 
     return {
         "pending_tool_calls": [pending_call],
         "tool_call_count": tool_call_count,
+        "tool_call_limit": tool_call_limit,
         "agent_finished": False,
         "is_complete": False,
         "status": "paused" if approval_required else "running",
@@ -1590,6 +1664,19 @@ def agent_tool_node(
         "cancelled",
     }:
         return {}
+
+    try:
+        profile = _get_agent_profile(config)
+    except TypeError as exc:
+        message = f"Agent Profile 配置无效: {exc}"
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
 
     pending_calls = state.get("pending_tool_calls") or []
 
@@ -1623,12 +1710,22 @@ def agent_tool_node(
         0
     )
 
+    configured_tool_call_limit = (
+        profile.tool_call_limit
+        if (
+            profile is not None
+            and profile.tool_call_limit is not None
+        )
+        else state.get(
+            "tool_call_limit",
+            getattr(settings,"tool_call_limit",20),
+        )
+    )
+
+
     tool_call_limit = max(
         int(
-            state.get(
-                "tool_call_limit",
-                getattr(settings,"tool_call_limit",20)
-            )
+            configured_tool_call_limit
         ),
         0,
     )
@@ -1660,8 +1757,15 @@ def agent_tool_node(
             "status": "failed",
         }
 
-    tool_approval_enabled = bool(
-        getattr(settings, "tool_approval", False)
+    tool_approval_enabled = (
+        profile.require_tool_approval
+        if (
+            profile is not None
+            and profile.require_tool_approval is not None
+        )
+        else bool(
+            getattr(settings, "tool_approval", False)
+        )
     )
 
     if (

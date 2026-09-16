@@ -83,7 +83,7 @@
 
 - [x] Tool Registry
 - [x] 动态工具装配
-- [ ] Agent Profile
+- [x] Agent Profile
 - [x] 工具白名单
 - [ ] 工具黑名单
 - [ ] 工具去重
