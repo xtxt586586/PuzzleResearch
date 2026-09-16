@@ -440,6 +440,15 @@ class AgentToolNodeTests(unittest.TestCase):
             [1, 1, 2, 3],
         )
 
+        for event in result["tool_events"][1:]:
+            self.assertIn("duration_ms", event)
+            self.assertGreaterEqual(
+                event["duration_ms"],
+                0,
+            )
+
+
+
     def test_profile_blocks_blacklisted_tool(self):
         model = FakePlanningModel(
             '{"tool_name": "python_executor", '
@@ -562,6 +571,10 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertEqual(
             result["tool_events"][1]["attempt"],
             1,
+        )
+        self.assertGreaterEqual(
+            result["tool_events"][1]["duration_ms"],
+            0,
         )
 
 
@@ -757,6 +770,10 @@ class AgentToolNodeTests(unittest.TestCase):
             "tool_cache_hit",
         )
         self.assertEqual(result["tool_call_count"], 1)
+        self.assertEqual(
+            result["tool_events"][0]["duration_ms"],
+            0.0,
+        )
 
 
     def test_profile_does_not_cache_failed_tool_result(self):

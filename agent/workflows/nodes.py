@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import re
 from typing import Dict,Any
 
@@ -1379,6 +1380,7 @@ def _make_tool_event(
         call_count: int,
         attempt: int,
         error: str = "",
+        duration_ms: float | None = None,
 ) -> Dict[str,Any]:
     """
     创建统一格式的工具执行事件。
@@ -1396,6 +1398,12 @@ def _make_tool_event(
 
     if error:
         event["error"] = error
+
+    if duration_ms is not None:
+        event["duration_ms"] = round(
+            max(float(duration_ms), 0.0),
+            3,
+        )
 
     return event
 
@@ -2035,7 +2043,7 @@ def agent_tool_node(
                 output = "（缓存结果没有标准输出）"
 
             report = (
-                f"工具「{tool_name}」服用缓存结果 ：\n"
+                f"工具「{tool_name}」复用缓存结果 ：\n"
                 f"{output}"
             )
 
@@ -2044,6 +2052,7 @@ def agent_tool_node(
                 tool_name=tool_name,
                 call_count=tool_call_count + 1,
                 attempt=1,
+                duration_ms=0.0,
             )
 
             return {
@@ -2054,7 +2063,7 @@ def agent_tool_node(
                 "tool_events": [cache_event],
                 "tool_call_count": tool_call_count + 1,
                 "final_report": report,
-                "debug_report": report,
+                "draft_report": report,
                 "messages": [
                     AIMessage(content=report)
                 ],
@@ -2090,6 +2099,7 @@ def agent_tool_node(
     ]
 
     while True:
+        attempt_started_at = time.perf_counter()
 
         try:
             tool_result = registry.invoke(
@@ -2109,6 +2119,9 @@ def agent_tool_node(
                         call_count=tool_call_count + 1,
                         attempt=attempt,
                         error=error_text,
+                        duration_ms=(
+                            time.perf_counter() - attempt_started_at
+                        ) * 1000,
                     )
                 )
 
@@ -2144,6 +2157,9 @@ def agent_tool_node(
                     call_count=tool_call_count + 1,
                     attempt=attempt,
                     error=error_text,
+                    duration_ms=(
+                        time.perf_counter() - attempt_started_at
+                    ) * 1000,
                 )
             )
 
@@ -2167,6 +2183,9 @@ def agent_tool_node(
             call_count=tool_call_count + 1,
             attempt=attempt,
             error=result_error,
+            duration_ms=(
+                time.perf_counter() - attempt_started_at
+            ) * 1000,
         )
     )
 
