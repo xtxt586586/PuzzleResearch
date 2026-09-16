@@ -26,6 +26,8 @@ class AgentProfile:
 
     deduplicate_tool_calls: bool | None = None
 
+    cache_tool_results: bool | None = None
+
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("Agent Profile 的名称不能为空。")

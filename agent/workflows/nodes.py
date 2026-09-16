@@ -1460,6 +1460,65 @@ def _has_prior_tool_call(
 
 
 
+def _get_cached_tool_results(
+        state: AgentState,
+        tool_name: str,
+        arguments: Dict[str,Any],
+) -> Dict[str,Any] | None:
+    """
+    查找相同工具和参数的成功执行结果。
+
+    失败结果不缓存，避免后续调用永久复用失败信息。
+    """
+
+    current_signature = _tool_call_signature(
+        tool_name,
+        arguments,
+    )
+
+    for item in state.get("tool_results") or []:
+        if not isinstance(item,dict):
+            continue
+
+        prior_tool_name = str(
+            item.get("tool_name","")
+        ).strip()
+
+        prior_arguments = item.get(
+            "arguments",
+            {},
+        )
+
+        if _tool_call_signature(
+            prior_tool_name,
+            prior_arguments,
+        ) != current_signature:
+            continue
+
+        prior_result = item.get("result")
+
+        if not isinstance(prior_result,dict):
+            continue
+
+        if str(
+            prior_result.get("error","")
+        ).strip():
+            continue
+
+        return {
+            "tool_name": prior_tool_name,
+            "arguments": prior_arguments,
+            "result": prior_result,
+        }
+
+
+    return None
+
+
+
+
+
+
 def agent_plan_node(
         state: AgentState,
         config: RunnableConfig,
@@ -1953,6 +2012,56 @@ def agent_tool_node(
                 "is_complete": False,
                 "status": "cancelled",
             }
+
+
+    if (
+        profile is not None
+        and profile.cache_tool_results is True
+    ):
+        cached_call = _get_cached_tool_results(
+            state,
+            tool_name,
+            arguments,
+        )
+
+        if cached_call is not None:
+            cached_result = cached_call["result"]
+
+            output = str(
+                cached_result.get("output", "")
+            ).strip()
+
+            if not output:
+                output = "（缓存结果没有标准输出）"
+
+            report = (
+                f"工具「{tool_name}」服用缓存结果 ：\n"
+                f"{output}"
+            )
+
+            cache_event = _make_tool_event(
+                "tool_cache_hit",
+                tool_name=tool_name,
+                call_count=tool_call_count + 1,
+                attempt=1,
+            )
+
+            return {
+                "pending_tool_calls": [],
+                "tool_results": [
+                    cached_call
+                ],
+                "tool_events": [cache_event],
+                "tool_call_count": tool_call_count + 1,
+                "final_report": report,
+                "debug_report": report,
+                "messages": [
+                    AIMessage(content=report)
+                ],
+                "is_complete": False,
+                "status": "running",
+            }
+
 
 
     configured_tool_retry_limit = (

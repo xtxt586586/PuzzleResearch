@@ -686,5 +686,152 @@ class AgentToolNodeTests(unittest.TestCase):
         )
 
 
+    def test_profile_reuses_cached_tool_result(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo_tool(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        profile = AgentProfile(
+            name="cache-profile",
+            cache_tool_results=True,
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "echo",
+                        "arguments": {
+                            "text": "hello",
+                        },
+                    }
+                ],
+                "tool_results": [
+                    {
+                        "tool_name": "echo",
+                        "arguments": {
+                            "text": "hello",
+                        },
+                        "result": {
+                            "output": "hello",
+                            "error": "",
+                        },
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(attempts["count"], 0)
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "hello",
+        )
+        self.assertEqual(
+            result["tool_events"][0]["event_type"],
+            "tool_cache_hit",
+        )
+        self.assertEqual(result["tool_call_count"], 1)
+
+
+    def test_profile_does_not_cache_failed_tool_result(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo_tool(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        profile = AgentProfile(
+            name="cache-profile",
+            cache_tool_results=True,
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "echo",
+                        "arguments": {
+                            "text": "hello",
+                        },
+                    }
+                ],
+                "tool_results": [
+                    {
+                        "tool_name": "echo",
+                        "arguments": {
+                            "text": "hello",
+                        },
+                        "result": {
+                            "output": "",
+                            "error": "previous failure",
+                        },
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(attempts["count"], 1)
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in result["tool_events"]
+            ],
+            [
+                "tool_started",
+                "tool_completed",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
