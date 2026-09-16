@@ -1372,6 +1372,34 @@ def _get_agent_tool_registry(
     return registry
 
 
+def _make_tool_event(
+        event_type: str,
+        *,
+        tool_name: str,
+        call_count: int,
+        attempt: int,
+        error: str = "",
+) -> Dict[str,Any]:
+    """
+    创建统一格式的工具执行事件。
+
+    事件只保存执行元数据和错误信息，
+    具体参数与结果保存在 tool_results 中。
+    """
+
+    event = {
+        "event_type": event_type,
+        "tool_name": tool_name,
+        "call_count": call_count,
+        "attempt": attempt,
+    }
+
+    if error:
+        event["error"] = error
+
+    return event
+
+
 
 def agent_plan_node(
         state: AgentState,
@@ -1842,6 +1870,15 @@ def agent_tool_node(
     )
 
     retry_count = 0
+    attempt = 1
+    execution_events = [
+        _make_tool_event(
+            "tool_started",
+            tool_name=tool_name,
+            call_count=tool_call_count + 1,
+            attempt=attempt,
+        )
+    ]
 
     while True:
 
@@ -1853,10 +1890,23 @@ def agent_tool_node(
             break
 
         except Exception as exc:
+            error_text = str(exc)
+
             if retry_count >= retry_limit:
+                execution_events.append(
+                    _make_tool_event(
+                        "tool_failed",
+                        tool_name=tool_name,
+                        call_count=tool_call_count + 1,
+                        attempt=attempt,
+                        error=error_text,
+                    )
+                )
+
+
                 message = (
                     f"工具「{tool_name}」执行失败，"
-                    f"已重试 {retry_count} 次：{exc}"
+                    f"已重试 {retry_count} 次：{error_text}"
                 )
 
                 return {
@@ -1869,6 +1919,7 @@ def agent_tool_node(
                             },
                         }
                     ],
+                    "tool_events": execution_events,
                     "tool_call_count": tool_call_count + 1,
                     "final_report": message,
                     "errors": [message],
@@ -1876,10 +1927,40 @@ def agent_tool_node(
                     "is_complete": False,
                     "status": "failed",
                 }
+
+            execution_events.append(
+                _make_tool_event(
+                    "tool_retry",
+                    tool_name=tool_name,
+                    call_count=tool_call_count + 1,
+                    attempt=attempt,
+                    error=error_text,
+                )
+            )
+
             retry_count += 1
+            attempt += 1
 
+    if not isinstance(tool_result, dict):
+        tool_result = {
+            "output": tool_result,
+            "error": "",
+        }
 
-    result_error = ""
+    result_error = str(
+        tool_result.get("error", "")
+    ).strip()
+
+    execution_events.append(
+        _make_tool_event(
+            "tool_failed" if result_error else "tool_completed",
+            tool_name=tool_name,
+            call_count=tool_call_count + 1,
+            attempt=attempt,
+            error=result_error,
+        )
+    )
+
 
     if isinstance(tool_result, dict):
         result_error = str(tool_result.get("error", "")).strip()
@@ -1914,6 +1995,7 @@ def agent_tool_node(
                     "result": tool_result,
                 }
             ],
+            "tool_events": execution_events,
             "tool_call_count": tool_call_count + 1,
             "final_report": report,
             "draft_report": report,

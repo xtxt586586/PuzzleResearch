@@ -202,6 +202,11 @@ class AgentState(TypedDict,total=False):
         operator.add,
     ]
 
+    tool_events: Annotated[
+        List[Dict[str,Any]],
+        operator.add,
+    ]
+
     # ========== 取消和错误 ==========
 
     cancel_token_id: Optional[str]

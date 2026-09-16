@@ -420,6 +420,25 @@ class AgentToolNodeTests(unittest.TestCase):
             result["tool_results"][0]["result"]["output"],
             "success",
         )
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in result["tool_events"]
+            ],
+            [
+                "tool_started",
+                "tool_retry",
+                "tool_retry",
+                "tool_completed",
+            ],
+        )
+        self.assertEqual(
+            [
+                event["attempt"]
+                for event in result["tool_events"]
+            ],
+            [1, 1, 2, 3],
+        )
 
     def test_profile_blocks_blacklisted_tool(self):
         model = FakePlanningModel(
@@ -488,6 +507,61 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertIn(
             "工具被 Agent Profile 禁止",
             result["final_report"],
+        )
+
+    def test_tool_events_capture_successful_execution(self):
+        def echo_tool(text: str) -> dict[str, str]:
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "echo",
+                        "arguments": {
+                            "text": "hello",
+                        },
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                }
+            },
+        )
+
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in result["tool_events"]
+            ],
+            [
+                "tool_started",
+                "tool_completed",
+            ],
+        )
+        self.assertEqual(
+            result["tool_events"][0]["tool_name"],
+            "echo",
+        )
+        self.assertEqual(
+            result["tool_events"][1]["attempt"],
+            1,
         )
 
 
