@@ -421,6 +421,75 @@ class AgentToolNodeTests(unittest.TestCase):
             "success",
         )
 
+    def test_profile_blocks_blacklisted_tool(self):
+        model = FakePlanningModel(
+            '{"tool_name": "python_executor", '
+            '"arguments": {"code": "print(42)"}}'
+        )
+
+        profile = AgentProfile(
+            name="no-python",
+            blocked_tools=frozenset({"python_executor"}),
+        )
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = agent_plan_node(
+                {
+                    "input": "请执行 Python 代码",
+                },
+                config={
+                    "configurable": {
+                        "agent_profile": profile,
+                    }
+                },
+            )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "工具未启用",
+            result["final_report"],
+        )
+
+    def test_profile_blocks_direct_tool_execution(self):
+        profile = AgentProfile(
+            name="no-python",
+            blocked_tools=frozenset({"python_executor"}),
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "python_executor",
+                        "arguments": {
+                            "code": "print(42)",
+                        },
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "工具被 Agent Profile 禁止",
+            result["final_report"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

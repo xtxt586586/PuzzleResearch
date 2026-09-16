@@ -16,6 +16,8 @@ class AgentProfile:
 
     enabled_tools: frozenset[str] | None = None
 
+    blocked_tools: frozenset[str] | None = None
+
     tool_call_limit: int | None = None
 
     require_tool_approval: bool | None = None
@@ -45,4 +47,17 @@ class AgentProfile:
                 self,
                 "enabled_tools",
                 normalized_tools,
+            )
+
+        if self.blocked_tools is not None:
+            normalized_blocked_tools = frozenset(
+                str(tool_name).strip()
+                for tool_name in self.blocked_tools
+                if str(tool_name).strip()
+            )
+
+            object.__setattr__(
+                self,
+                "blocked_tools",
+                normalized_blocked_tools,
             )

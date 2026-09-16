@@ -1467,10 +1467,18 @@ def agent_plan_node(
     else:
         enabled_tools = state_enabled_tools
 
+    if (
+        profile is not None
+        and profile.blocked_tools is not None
+    ):
+        for blocked_tool_name in profile.blocked_tools:
+            enabled_tools[blocked_tool_name] = False
+
 
     tool_descriptions = "\n".join(
         f"- {tool.name}: {tool.description}"
         for tool in available_tools
+        if enabled_tools.get(tool.name, False)
     )
 
 
@@ -1756,6 +1764,24 @@ def agent_tool_node(
             "is_complete": False,
             "status": "failed",
         }
+
+
+    if (
+        profile is not None
+        and profile.blocked_tools is not None
+        and tool_name in profile.blocked_tools
+    ):
+        message = f"工具被 Agent Profile 禁止：{tool_name}"
+
+        return {
+            "pending_tool_calls": [],
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
 
     tool_approval_enabled = (
         profile.require_tool_approval
