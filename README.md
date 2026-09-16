@@ -56,7 +56,7 @@ PuzzleResearch 是一个基于 LangGraph 的全功能 AI Agent 研究平台。
 ## 开发状态
 
 
-当前阶段：阶段 14 已完成，已具备路由、Web Research、Deep Research、评估修订和 Agent 工具调用主流程。
+当前阶段：阶段 16 已完成，已具备路由、Web Research、Deep Research、评估修订和多轮 Agent 工具调用主流程。
 
 当前可以稳定运行的路径：
 
@@ -64,7 +64,7 @@ PuzzleResearch 是一个基于 LangGraph 的全功能 AI Agent 研究平台。
 - `web`：规划查询、并行搜索、写作和评估
 - `deep`：多查询、多轮补充研究、综合写作和评估修订
 - `clarify`：生成澄清问题并暂停本次执行
-- `agent`：生成工具调用计划、校验工具白名单、限制调用次数并执行 Python 工具
+- `agent`：多轮规划工具调用、执行工具、读取结果并生成最终回答
 
 Agent 工具路径支持：
 
@@ -73,6 +73,9 @@ Agent 工具路径支持：
 - 输出长度限制
 - 工具调用次数限制
 - 工具审批中断与 `Command(resume=...)` 恢复
+- 工具结果驱动的重新规划
+- 多轮工具调用
+- 达到工具调用上限后自动停止
 
 当前工具审批使用 LangGraph `InMemorySaver`，仅适合开发和测试环境。
 

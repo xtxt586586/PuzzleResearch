@@ -6,6 +6,7 @@ from langgraph.graph import END,StateGraph
 from langgraph.types import Send
 
 from agent.core.state import AgentState
+from common.config import settings
 from agent.workflows.nodes import (
     direct_answer_node,
     finalize_node,
@@ -47,9 +48,9 @@ def create_research_graph(checkpointer=None):
           │          ↓
           │        evaluator
           │
-          └── agent → agent_plan → agent_tool → finalize
+          └── agent → agent_plan ⇄ agent_tool → finalize
                                   ↑
-                            可选 interrupt/resume
+                         可选 interrupt/resume
     """
 
     workflow = StateGraph(AgentState)
@@ -111,6 +112,63 @@ def create_research_graph(checkpointer=None):
 
         return "direct_answer"
 
+
+    def agent_plan_decision(state: AgentState) -> str:
+        """
+        判断规划节点是进入工具执行，还是直接结束。
+        """
+
+        current_status = state.get("status")
+
+        if current_status in {
+            "failed",
+            "cancelled",
+        }:
+            return "finalize"
+
+        if state.get("agent_finished"):
+            return "finalize"
+
+        return "agent_tool"
+
+    def agent_tool_decision(state: AgentState) -> str:
+        """
+        判断工具执行后是结束，还是回到规划节点继续执行。
+        """
+
+        current_status = state.get("status")
+
+        if current_status in {
+            "failed",
+            "cancelled",
+        }:
+            return "finalize"
+
+        if state.get("agent_finished"):
+            return "finalize"
+
+        tool_call_count = max(
+            int(state.get("tool_call_count", 0)),
+            0,
+        )
+
+        tool_call_limit = max(
+            int(
+                state.get(
+                    "tool_call_limit",
+                    getattr(settings,"tool_call_limit",20),
+                )
+            ),
+            0,
+        )
+
+        if tool_call_count >= tool_call_limit:
+            return "finalize"
+
+        return "agent_plan"
+
+
+
     #添加决策边
     workflow.add_conditional_edges(
         "router",
@@ -127,8 +185,22 @@ def create_research_graph(checkpointer=None):
     #添加普通边
     workflow.add_edge("direct_answer","finalize")
     workflow.add_edge("clarify","finalize")
-    workflow.add_edge("agent_plan", "agent_tool")
-    workflow.add_edge("agent_tool", "finalize")
+    workflow.add_conditional_edges(
+        "agent_plan",
+        agent_plan_decision,
+        {
+            "agent_tool": "agent_tool",
+            "finalize": "finalize",
+        },
+    )
+    workflow.add_conditional_edges(
+        "agent_tool",
+        agent_tool_decision,
+        {
+            "finalize": "finalize",
+            "agent_plan": "agent_plan",
+        },
+    )
     workflow.add_conditional_edges(
         "web_plan",
         fan_out_searches,
