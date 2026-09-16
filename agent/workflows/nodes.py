@@ -1413,26 +1413,52 @@ def agent_plan_node(
         for tool in available_tools
     )
 
+
+    prior_tool_results = state.get("tool_results") or []
+
+    if prior_tool_results:
+        tool_history = json.dumps(
+            prior_tool_results[-5:],
+            ensure_ascii=False,
+            default=str,
+        )
+
+    else:
+        tool_history = "尚未执行任何工具"
+
+
     planner_messages = [
         SystemMessage(
             content=(
-                "你是 PuzzleResearch 的工具调用规划器。"
-                "请根据用户请求，从当前可用工具中选择一个工具。"
+                "你是 PuzzleResearch 的多轮工具调用规划器。"
+                "请根据用户请求和工具执行历史决定下一步。"
+                "如果还需要工具，返回 action=tool。"
+                "如果任务已经完成，返回 action=finish。"
                 "不要选择不在工具列表中的工具。"
                 f"\n当前可用工具：\n{tool_descriptions}\n"
-                "请把工具参数放入 arguments。"
                 "只能返回 JSON，不要输出 Markdown 代码块或解释文字。"
                 "\n\n"
-                "JSON 格式："
+                "调用工具时的 JSON 格式："
                 "\n"
                 "{"
+                '"action": "tool", '
                 '"tool_name": "工具名称", '
                 '"arguments": {"参数名": "参数值"}'
+                "}"
+                "\n\n"
+                "完成任务时的 JSON 格式："
+                "\n"
+                "{"
+                '"action": "finish", '
+                '"final_report": "最终回答"'
                 "}"
             )
         ),
         HumanMessage(
-            content=f"用户请求：\n{user_input}"
+            content=(
+                f"用户请求：\n{user_input}\n\n"
+                f"工具执行历史：\n{tool_history}"
+            )
         ),
     ]
 
@@ -1450,6 +1476,35 @@ def agent_plan_node(
         data = _parse_json_object(
             _extract_response_text(response)
         )
+
+
+        action = str(
+            data.get("action","tool")
+        ).strip().lower()
+
+        if action == "finish":
+            final_report = str(
+                data.get("final_report","")
+            ).strip()
+
+            if not final_report:
+                raise ValueError("完成动作缺少 final_report")
+
+            return {
+                "pending_tool_calls": [],
+                "final_report": final_report,
+                "draft_report": final_report,
+                "messages": [
+                    AIMessage(content=final_report),
+                ],
+                "agent_finished": True,
+                "is_complete": False,
+                "status": "running",
+            }
+
+        if action != "tool":
+            raise ValueError(f"不支持的 Agent action: {action}")
+
 
         tool_name = str(
             data.get("tool_name","")
@@ -1514,6 +1569,7 @@ def agent_plan_node(
     return {
         "pending_tool_calls": [pending_call],
         "tool_call_count": tool_call_count,
+        "agent_finished": False,
         "is_complete": False,
         "status": "paused" if approval_required else "running",
     }

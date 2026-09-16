@@ -191,6 +191,7 @@ class AgentState(TypedDict,total=False):
     # ========== 工具控制 ==========
 
     tool_approved: bool
+    agent_finished: bool
     pending_tool_calls: List[Dict[str,Any]]
     tool_call_count: int
     tool_call_limit: int

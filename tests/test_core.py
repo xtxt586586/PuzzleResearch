@@ -145,17 +145,36 @@ class CoreContractTests(unittest.TestCase):
 
     def test_graph_routes_agent_request_to_tool_node(self):
         class FakePlanningModel:
+            def __init__(self):
+                self.responses = [
+                    (
+                        '{"action": "tool", '
+                        '"tool_name": "python_executor", '
+                        '"arguments": {'
+                        '"code": "print(2 + 3)"'
+                        "}}"
+                    ),
+                    (
+                        '{"action": "finish", '
+                        '"final_report": "计算完成，结果是 5。"}'
+                    ),
+                ]
+                self.index = 0
+
             def invoke(self, messages, config=None):
+                content = self.responses[
+                    min(
+                        self.index,
+                        len(self.responses) - 1,
+                    )
+                ]
+                self.index += 1
+
                 return type(
                     "FakeResponse",
                     (),
                     {
-                        "content": (
-                            '{"tool_name": "python_executor", '
-                            '"arguments": {'
-                            '"code": "print(2 + 3)"'
-                            "}}"
-                        )
+                        "content": content,
                     },
                 )()
 
@@ -188,17 +207,36 @@ class CoreContractTests(unittest.TestCase):
 
     def test_graph_pauses_and_resumes_tool_approval(self):
         class FakePlanningModel:
+            def __init__(self):
+                self.responses = [
+                    (
+                        '{"action": "tool", '
+                        '"tool_name": "python_executor", '
+                        '"arguments": {'
+                        '"code": "print(2 + 3)"'
+                        "}}"
+                    ),
+                    (
+                        '{"action": "finish", '
+                        '"final_report": "计算完成，结果是 5。"}'
+                    ),
+                ]
+                self.index = 0
+
             def invoke(self, messages, config=None):
+                content = self.responses[
+                    min(
+                        self.index,
+                        len(self.responses) - 1,
+                    )
+                ]
+                self.index += 1
+
                 return type(
                     "FakeResponse",
                     (),
                     {
-                        "content": (
-                            '{"tool_name": "python_executor", '
-                            '"arguments": {'
-                            '"code": "print(2 + 3)"'
-                            "}}"
-                        )
+                        "content": content,
                     },
                 )()
 
@@ -276,6 +314,127 @@ class CoreContractTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(graph.get_graph())
+
+
+    def test_graph_replans_after_tool_result(self):
+        class SequentialPlanningModel:
+            def __init__(self):
+                self.responses = [
+                    (
+                        '{"action": "tool", '
+                        '"tool_name": "python_executor", '
+                        '"arguments": {'
+                        '"code": "print(2 + 3)"'
+                        "}}"
+                    ),
+                    (
+                        '{"action": "finish", '
+                        '"final_report": "计算完成，结果是 5。"}'
+                    ),
+                ]
+                self.calls = 0
+
+            def invoke(self, messages, config=None):
+                response = type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "content": self.responses[self.calls],
+                    },
+                )()
+
+                self.calls += 1
+                return response
+
+        model = SequentialPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = create_research_graph().invoke(
+                {
+                    "input": "请执行 Python 代码计算 2 加 3，然后告诉我结果",
+                    "messages": [],
+                }
+            )
+
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            len(result["tool_results"]),
+            1,
+        )
+        self.assertEqual(
+            result["final_report"],
+            "计算完成，结果是 5。",
+        )
+
+
+    def test_graph_stops_at_tool_call_limit(self):
+        class RepeatingPlanningModel:
+            def __init__(self):
+                self.calls = 0
+
+            def invoke(self, messages, config=None):
+                self.calls += 1
+
+                return type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "content": (
+                            '{"action": "tool", '
+                            '"tool_name": "python_executor", '
+                            '"arguments": {'
+                            '"code": "print(2 + 3)"'
+                            "}}"
+                        )
+                    },
+                )()
+
+        model = RepeatingPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = create_research_graph().invoke(
+                {
+                    "input": "请执行 Python 代码计算 2 加 3",
+                    "messages": [],
+                    "tool_call_limit": 1,
+                }
+            )
+
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            model.calls,
+            1,
+        )
 
 
 if __name__ == "__main__":
