@@ -565,5 +565,126 @@ class AgentToolNodeTests(unittest.TestCase):
         )
 
 
+    def test_profile_deduplicates_repeated_tool_plan(self):
+        model = FakePlanningModel(
+            '{"tool_name": "python_executor", '
+            '"arguments": {"b": 2, "a": 1}}'
+        )
+
+        profile = AgentProfile(
+            name="deduplicating-profile",
+            deduplicate_tool_calls=True,
+        )
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = agent_plan_node(
+                {
+                    "input": "请执行工具",
+                    "tool_results": [
+                        {
+                            "tool_name": "python_executor",
+                            "arguments": {
+                                "a": 1,
+                                "b": 2,
+                            },
+                            "result": {
+                                "output": "previous",
+                            },
+                        }
+                    ],
+                },
+                config={
+                    "configurable": {
+                        "agent_profile": profile,
+                    }
+                },
+            )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "重复工具调用",
+            result["final_report"],
+        )
+
+
+    def test_profile_blocks_direct_duplicate_execution(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo_tool(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        profile = AgentProfile(
+            name="deduplicating-profile",
+            deduplicate_tool_calls=True,
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "echo",
+                        "arguments": {
+                            "text": "hello",
+                        },
+                    }
+                ],
+                "tool_results": [
+                    {
+                        "tool_name": "echo",
+                        "arguments": {
+                            "text": "hello",
+                        },
+                        "result": {
+                            "output": "hello",
+                        },
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "重复工具调用",
+            result["final_report"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            0,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

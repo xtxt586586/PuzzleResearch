@@ -1400,6 +1400,65 @@ def _make_tool_event(
     return event
 
 
+def _tool_call_signature(
+        tool_name: str,
+        arguments: Any,
+) -> str:
+    """
+    创建稳定的工具调用签名。
+
+    sort_keys=True 可以忽略参数字典的插入顺序，
+    确保内容相同的调用得到相同签名。
+    """
+
+    return json.dumps(
+        {
+            "tool_name": tool_name,
+            "arguments": arguments,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _has_prior_tool_call(
+        state: AgentState,
+        tool_name: str,
+        arguments: Dict[str,Any],
+) -> bool:
+    """
+    判断当前工具调用是否已经执行过。
+    """
+
+    current_signature = _tool_call_signature(
+        tool_name,
+        arguments,
+    )
+
+    for item in state.get("tool_results") or []:
+        if not isinstance(item,dict):
+            continue
+
+        prior_tool_name = str(
+            item.get("tool_name","")
+        ).strip()
+
+        prior_arguments = item.get(
+            "arguments",
+            {},
+        )
+
+        if _tool_call_signature(
+            prior_tool_name,
+            prior_arguments,
+        ) == current_signature:
+            return True
+
+    return False
+
+
 
 def agent_plan_node(
         state: AgentState,
@@ -1652,6 +1711,26 @@ def agent_plan_node(
             "status": "failed",
         }
 
+
+    if (
+        profile is not None
+        and profile.deduplicate_tool_calls is True
+        and _has_prior_tool_call(
+            state,
+            tool_name,
+            arguments,
+        )
+    ):
+        message = f"检测到重复工具调用：{tool_name}"
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
     pending_call = {
         "tool_name": tool.name,
         "arguments": arguments,
@@ -1809,6 +1888,27 @@ def agent_tool_node(
             "is_complete": False,
             "status": "failed",
         }
+
+    if (
+        profile is not None
+        and profile.deduplicate_tool_calls is True
+        and _has_prior_tool_call(
+            state,
+            tool_name,
+            arguments,
+        )
+    ):
+        message = f"检测到重复工具调用：{tool_name}"
+
+        return {
+            "pending_tool_calls": [],
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
 
 
     tool_approval_enabled = (

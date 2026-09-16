@@ -24,6 +24,8 @@ class AgentProfile:
 
     tool_retry_limit: int | None = None
 
+    deduplicate_tool_calls: bool | None = None
+
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("Agent Profile 的名称不能为空。")
