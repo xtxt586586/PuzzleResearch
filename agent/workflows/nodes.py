@@ -1800,32 +1800,58 @@ def agent_tool_node(
                 "status": "cancelled",
             }
 
-    try:
-        tool_result = registry.invoke(
-            tool_name,
-            arguments,
+
+    configured_tool_retry_limit = (
+        profile.tool_retry_limit
+        if (
+            profile is not None
+            and profile.tool_retry_limit is not None
         )
+        else 0
+    )
 
-    except Exception as exc:
-        message = f"工具「{tool_name}」执行失败：{exc}"
+    retry_limit = max(
+        int(configured_tool_retry_limit),
+        0,
+    )
 
-        return {
-            "pending_tool_calls": [],
-            "tool_results": [
-                {
-                    **pending_call,
-                    "result": {
-                        "error": str(exc),
-                    },
+    retry_count = 0
+
+    while True:
+
+        try:
+            tool_result = registry.invoke(
+                tool_name,
+                arguments,
+            )
+            break
+
+        except Exception as exc:
+            if retry_count >= retry_limit:
+                message = (
+                    f"工具「{tool_name}」执行失败，"
+                    f"已重试 {retry_count} 次：{exc}"
+                )
+
+                return {
+                    "pending_tool_calls": [],
+                    "tool_results": [
+                        {
+                            **pending_call,
+                            "result": {
+                                "error": str(exc),
+                            },
+                        }
+                    ],
+                    "tool_call_count": tool_call_count + 1,
+                    "final_report": message,
+                    "errors": [message],
+                    "last_error": message,
+                    "is_complete": False,
+                    "status": "failed",
                 }
-            ],
-            "tool_call_count": tool_call_count + 1,
-            "final_report": message,
-            "errors": [message],
-            "last_error": message,
-            "is_complete": False,
-            "status": "failed",
-        }
+            retry_count += 1
+
 
     result_error = ""
 

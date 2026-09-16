@@ -357,5 +357,70 @@ class AgentToolNodeTests(unittest.TestCase):
         )
 
 
+    def test_profile_retries_transient_tool_error(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def flaky_tool(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            if attempts["count"] < 3:
+                raise RuntimeError("temporary failure")
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="flaky",
+                    description="一个会暂时失败的测试工具",
+                    handler=flaky_tool,
+                ),
+            ]
+        )
+
+        profile = AgentProfile(
+            name="retry-profile",
+            tool_retry_limit=2,
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "flaky",
+                        "arguments": {
+                            "text": "success",
+                        },
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        self.assertEqual(
+            result["status"],
+            "running",
+        )
+        self.assertEqual(
+            attempts["count"],
+            3,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "success",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
