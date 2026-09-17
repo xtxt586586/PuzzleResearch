@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
@@ -127,6 +127,86 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(
             runtime_config["configurable"]["thread_id"],
             "thread-001",
+        )
+
+
+
+class AgentRuntimeAsyncTests(
+        unittest.IsolatedAsyncioTestCase,
+):
+    async def test_ainvoke_forwards_payload_and_config(self):
+        runtime = AgentRuntime()
+
+        with patch.object(
+            runtime.graph,
+            "ainvoke",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "completed",
+            },
+        ) as graph_ainvoke:
+            result = await runtime.ainvoke(
+                "异步测试请求",
+                thread_id="async-thread-001",
+            )
+
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+
+        payload = graph_ainvoke.call_args.args[0]
+        runtime_config = graph_ainvoke.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "异步测试请求",
+        )
+        self.assertEqual(
+            payload["messages"],
+            [],
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-thread-001",
+        )
+
+
+    async def test_aresume_forwards_command_and_config(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        with patch.object(
+            runtime.graph,
+            "ainvoke",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "completed",
+            },
+        ) as graph_ainvoke:
+            result = await runtime.aresume(
+                {"approved": True},
+                thread_id="async-thread-002",
+            )
+
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+
+        command = graph_ainvoke.call_args.args[0]
+        runtime_config = graph_ainvoke.call_args.kwargs["config"]
+
+        self.assertIsInstance(
+            command,
+            Command,
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-thread-002",
         )
 
 

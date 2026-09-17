@@ -101,6 +101,28 @@ class AgentRuntime:
         return runtime_config
 
 
+    def _build_payload(
+            self,
+            user_input: str,
+            messages: list[Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(user_input,str):
+            raise ValueError(
+                "user_input 必须是字符串。"
+            )
+
+        if not user_input.strip():
+            raise ValueError(
+                "user_input 不能为空。"
+            )
+
+        return {
+            "input": user_input,
+            "messages": list(messages or []),
+        }
+
+
+
     def invoke(
             self,
             user_input: str,
@@ -123,10 +145,10 @@ class AgentRuntime:
                 "user_input 不能为空。"
             )
 
-        payload = {
-            "input": user_input,
-            "messages": list(messages or []),
-        }
+        payload = self._build_payload(
+            user_input,
+            messages,
+        )
 
         runtime_config = self._build_config(
             config=config,
@@ -134,6 +156,34 @@ class AgentRuntime:
         )
 
         return self.graph.invoke(
+            payload,
+            config=runtime_config,
+        )
+
+
+    def ainvoke(
+            self,
+            user_input: str,
+            *,
+            messages: list[Any] | None = None,
+            thread_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+    ) -> dict[str,Any]:
+        """
+        异步执行一次新的 Agent 请求。
+        """
+
+        payload = self._build_payload(
+            user_input,
+            messages,
+        )
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return self.graph.ainvoke(
             payload,
             config=runtime_config,
         )
@@ -161,6 +211,32 @@ class AgentRuntime:
         )
 
         return self.graph.invoke(
+            Command(resume=resume_value),
+            config=runtime_config,
+        )
+
+    async def aresume(
+            self,
+            resume_value: Any,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+    ) -> dict[str,Any]:
+        """
+        异步恢复一个需要审批或人工介入的线程。
+        """
+
+        if self._checkpointer is None:
+            raise ValueError(
+                "aresume 需要配置 checkpointer"
+            )
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return await self.graph.ainvoke(
             Command(resume=resume_value),
             config=runtime_config,
         )
