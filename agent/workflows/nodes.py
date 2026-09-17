@@ -1524,6 +1524,56 @@ def _get_cached_tool_results(
 
 
 
+def _limit_tool_result(
+        tool_result: Any,
+        max_chars: int | None,
+) -> Dict[str, Any]:
+    """
+    限制工具 output 和 error 文本长度。
+
+    只裁剪结果文本，不修改 return_code、
+    timed_out 等结构化字段。
+    """
+
+    if isinstance(tool_result,dict):
+        normalized_result = dict(tool_result)
+
+    else:
+        normalized_result = {
+            "output": tool_result,
+            "error": "",
+        }
+
+    if max_chars is None:
+        return normalized_result
+
+    marker = "\n...[工具结果已截断]"
+
+    for field_name in {"output","error"}:
+        value = normalized_result.get(field_name)
+
+        if value is None:
+            continue
+
+        text = str(value)
+
+        if len(text) <= max_chars:
+            normalized_result[field_name] = text
+            continue
+
+        if max_chars <= len(marker):
+            clipped_text = marker[:max_chars]
+        else:
+            clipped_text = (
+                    text[:max_chars - len(marker)]
+                    + marker
+            )
+
+        normalized_result[field_name] = clipped_text
+        normalized_result["result_truncated"] = True
+
+    return normalized_result
+
 
 
 
@@ -1836,7 +1886,7 @@ def agent_plan_node(
 def agent_tool_node(
         state: AgentState,
         config: RunnableConfig,
-) -> Dict[str,Any]:
+) -> Dict[str, Any]:
     """
     执行已经批准的工具调用。
     """
@@ -1876,7 +1926,7 @@ def agent_tool_node(
     pending_call = pending_calls[0]
 
     tool_name = str(
-        pending_call.get("tool_name","")
+        pending_call.get("tool_name", "")
     ).strip()
 
     arguments = pending_call.get("arguments", {})
@@ -1889,7 +1939,7 @@ def agent_tool_node(
 
     tool_call_count = max(
         int(state.get("tool_call_count", 0)),
-        0
+        0,
     )
 
     configured_tool_call_limit = (
@@ -1900,15 +1950,12 @@ def agent_tool_node(
         )
         else state.get(
             "tool_call_limit",
-            getattr(settings,"tool_call_limit",20),
+            getattr(settings, "tool_call_limit", 20),
         )
     )
 
-
     tool_call_limit = max(
-        int(
-            configured_tool_call_limit
-        ),
+        int(configured_tool_call_limit),
         0,
     )
 
@@ -1927,7 +1974,7 @@ def agent_tool_node(
     try:
         registry = _get_agent_tool_registry(config)
         tool = registry.get(tool_name)
-    except (KeyError,TypeError) as exc:
+    except (KeyError, TypeError) as exc:
         message = str(exc)
 
         return {
@@ -1938,7 +1985,6 @@ def agent_tool_node(
             "is_complete": False,
             "status": "failed",
         }
-
 
     if (
         profile is not None
@@ -1975,8 +2021,6 @@ def agent_tool_node(
             "is_complete": False,
             "status": "failed",
         }
-
-
 
     tool_approval_enabled = (
         profile.require_tool_approval
@@ -2021,6 +2065,15 @@ def agent_tool_node(
                 "status": "cancelled",
             }
 
+    # ===== 新增：解析工具结果长度上限 =====
+    configured_tool_result_limit = (
+        profile.max_tool_result_chars
+        if (
+            profile is not None
+            and profile.max_tool_result_chars is not None
+        )
+        else None
+    )
 
     if (
         profile is not None
@@ -2033,7 +2086,16 @@ def agent_tool_node(
         )
 
         if cached_call is not None:
-            cached_result = cached_call["result"]
+            # ===== 修改：对缓存结果重新施加长度限制 =====
+            cached_result = _limit_tool_result(
+                cached_call["result"],
+                configured_tool_result_limit,
+            )
+
+            cached_call = {
+                **cached_call,
+                "result": cached_result,
+            }
 
             output = str(
                 cached_result.get("output", "")
@@ -2070,8 +2132,6 @@ def agent_tool_node(
                 "is_complete": False,
                 "status": "running",
             }
-
-
 
     configured_tool_retry_limit = (
         profile.tool_retry_limit
@@ -2125,7 +2185,6 @@ def agent_tool_node(
                     )
                 )
 
-
                 message = (
                     f"工具「{tool_name}」执行失败，"
                     f"已重试 {retry_count} 次：{error_text}"
@@ -2136,9 +2195,13 @@ def agent_tool_node(
                     "tool_results": [
                         {
                             **pending_call,
-                            "result": {
-                                "error": str(exc),
-                            },
+                            # ===== 修改：对执行失败结果施加长度限制 =====
+                            "result": _limit_tool_result(
+                                {
+                                    "error": str(exc),
+                                },
+                                configured_tool_result_limit,
+                            ),
                         }
                     ],
                     "tool_events": execution_events,
@@ -2172,6 +2235,12 @@ def agent_tool_node(
             "error": "",
         }
 
+    # ===== 新增：对成功执行结果施加长度限制 =====
+    tool_result = _limit_tool_result(
+        tool_result,
+        configured_tool_result_limit,
+    )
+
     result_error = str(
         tool_result.get("error", "")
     ).strip()
@@ -2188,7 +2257,6 @@ def agent_tool_node(
             ) * 1000,
         )
     )
-
 
     if isinstance(tool_result, dict):
         result_error = str(tool_result.get("error", "")).strip()
@@ -2210,12 +2278,13 @@ def agent_tool_node(
             )
 
         else:
+            # ===== 修改：统一使用 output，而不是整个 tool_result =====
             report = (
                 f"工具「{tool_name}」执行结果：\n"
-                f"{tool_result}"
+                f"{output}"
             )
 
-        result_state: Dict[str,Any] = {
+        result_state: Dict[str, Any] = {
             "pending_tool_calls": [],
             "tool_results": [
                 {

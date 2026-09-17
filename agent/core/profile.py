@@ -28,6 +28,8 @@ class AgentProfile:
 
     cache_tool_results: bool | None = None
 
+    max_tool_result_chars: int | None = None
+
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("Agent Profile 的名称不能为空。")
@@ -39,6 +41,7 @@ class AgentProfile:
         if self.tool_retry_limit is not None:
             if self.tool_retry_limit < 0:
                 raise ValueError("Agent Profile 的 tool_retry_limit 不能小于 0")
+
 
         if self.enabled_tools is not None:
             normalized_tools = frozenset(
@@ -65,3 +68,9 @@ class AgentProfile:
                 "blocked_tools",
                 normalized_blocked_tools,
             )
+
+        if self.max_tool_result_chars is not None:
+            if self.max_tool_result_chars <= 0:
+                raise ValueError(
+                    "Agent Profile 的 max_tool_result_chars 必须大于 0"
+                )

@@ -849,6 +849,121 @@ class AgentToolNodeTests(unittest.TestCase):
             ],
         )
 
+    def test_profile_limits_tool_result_output(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def large_output_tool() -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": "abcdefghijklmnopqrstuvwxyz",
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="large_output",
+                    description="返回较长文本",
+                    handler=large_output_tool,
+                ),
+            ]
+        )
+
+        profile = AgentProfile(
+            name="limited-result-profile",
+            max_tool_result_chars=16,
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "large_output",
+                        "arguments": {},
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        output = result["tool_results"][0]["result"]["output"]
+
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(attempts["count"], 1)
+        self.assertLessEqual(len(output), 16)
+        self.assertIn("工具结果已截断", output)
+        self.assertTrue(
+            result["tool_results"][0]["result"]["result_truncated"]
+        )
+        self.assertIn("工具结果已截断", result["final_report"])
+
+
+    def test_profile_limits_tool_result_error(self):
+        def failing_tool() -> dict[str, str]:
+            return {
+                "output": "",
+                "error": "abcdefghijklmnopqrstuvwxyz",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="failing_tool",
+                    description="返回较长错误信息",
+                    handler=failing_tool,
+                ),
+            ]
+        )
+
+        profile = AgentProfile(
+            name="limited-error-profile",
+            max_tool_result_chars=16,
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "failing_tool",
+                        "arguments": {},
+                    }
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                    "agent_profile": profile,
+                }
+            },
+        )
+
+        error_text = result["tool_results"][0]["result"]["error"]
+
+        self.assertEqual(result["status"], "failed")
+        self.assertLessEqual(len(error_text), 16)
+        self.assertIn("工具结果已截断", error_text)
+        self.assertTrue(
+            result["tool_results"][0]["result"]["result_truncated"]
+        )
+
+
+    def test_profile_rejects_invalid_result_limit(self):
+        with self.assertRaises(ValueError):
+            AgentProfile(
+                name="invalid-result-profile",
+                max_tool_result_chars=0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
