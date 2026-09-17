@@ -405,3 +405,131 @@ class AgentRuntime:
             stream_mode=stream_mode,
         ):
             yield chunk
+
+
+    def stream_events(
+            self,
+            user_input: str,
+            *,
+            messages: list[Any] | None = None,
+            thread_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            **kwargs: Any,
+    ):
+        """
+        同步流式返回 LangGraph 运行事件。
+
+        kwargs 会透传给 LangGraph，
+        例如 include_names、exclude_types 等过滤条件。
+        """
+
+        payload = self._build_payload(
+            user_input,
+            messages,
+        )
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return self.graph.stream_events(
+            payload,
+            config=runtime_config,
+            version=version,
+            **kwargs,
+        )
+
+
+    async def astream_events(
+            self,
+            user_input: str,
+            *,
+            messages: list[Any] | None = None,
+            thread_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            **kwargs: Any,
+    ):
+        """
+        异步流式返回 LangGraph 运行事件。
+
+        kwargs 会透传给 LangGraph，
+        例如 include_names、exclude_types 等过滤条件。
+        """
+
+        payload = self._build_payload(
+            user_input,
+            messages,
+        )
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        async for event in self.graph.astream_events(
+            payload,
+            config=runtime_config,
+            version=version,
+            **kwargs,
+        ):
+            yield event
+
+
+    def resume_events(
+            self,
+            resume_value: Any,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            **kwargs: Any,
+    ):
+        """
+        同步流式恢复一个需要审批或人工介入的线程。
+        """
+
+        self._require_checkpointer("resume_events")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return self.graph.stream_events(
+            Command(resume=resume_value),
+            config=runtime_config,
+            version=version,
+            **kwargs,
+        )
+
+
+    async def aresume_events(
+            self,
+            resume_value: Any,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            **kwargs: Any,
+    ):
+        """
+        异步流式恢复一个需要审批或人工介入的线程。
+        """
+
+        self._require_checkpointer("aresume_events")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        async for event in self.graph.astream_events(
+            Command(resume=resume_value),
+            config=runtime_config,
+            version=version,
+            **kwargs,
+        ):
+            yield event

@@ -471,5 +471,198 @@ class AgentRuntimeAsyncTests(
         )
 
 
+    def test_stream_events_forwards_version_and_filters(self):
+        runtime = AgentRuntime()
+
+        events = [
+            {
+                "event": "on_chain_start",
+            },
+            {
+                "event": "on_chain_end",
+            },
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "stream_events",
+            return_value=iter(events),
+        ) as graph_stream_events:
+            result = list(
+                runtime.stream_events(
+                    "事件流测试请求",
+                    thread_id="events-thread-001",
+                    version="v2",
+                    include_names=["agent_tool"],
+                )
+            )
+
+        self.assertEqual(result, events)
+
+        payload = graph_stream_events.call_args.args[0]
+        runtime_config = graph_stream_events.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "事件流测试请求",
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "events-thread-001",
+        )
+        self.assertEqual(
+            graph_stream_events.call_args.kwargs["version"],
+            "v2",
+        )
+        self.assertEqual(
+            graph_stream_events.call_args.kwargs["include_names"],
+            ["agent_tool"],
+        )
+
+
+    def test_resume_events_requires_checkpointer(self):
+        runtime = AgentRuntime()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "checkpointer",
+        ):
+            runtime.resume_events(
+                {"approved": True},
+                thread_id="events-thread-002",
+            )
+
+
+    def test_resume_events_forwards_command(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        events = [
+            {
+                "event": "on_chain_end",
+            },
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "stream_events",
+            return_value=iter(events),
+        ) as graph_stream_events:
+            result = list(
+                runtime.resume_events(
+                    {"approved": True},
+                    thread_id="events-thread-003",
+                )
+            )
+
+        self.assertEqual(result, events)
+
+        command = graph_stream_events.call_args.args[0]
+        runtime_config = graph_stream_events.call_args.kwargs["config"]
+
+        self.assertIsInstance(command, Command)
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "events-thread-003",
+        )
+
+
+    async def test_astream_events_forwards_version(self):
+        runtime = AgentRuntime()
+
+        async def event_stream():
+            yield {
+                "event": "on_chain_start",
+            }
+            yield {
+                "event": "on_chain_end",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=event_stream(),
+        ) as graph_astream_events:
+            result = [
+                event
+                async for event in runtime.astream_events(
+                    "异步事件流测试请求",
+                    thread_id="async-events-thread-001",
+                    version="v2",
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "event": "on_chain_start",
+                },
+                {
+                    "event": "on_chain_end",
+                },
+            ],
+        )
+
+        payload = graph_astream_events.call_args.args[0]
+        runtime_config = graph_astream_events.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "异步事件流测试请求",
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-events-thread-001",
+        )
+        self.assertEqual(
+            graph_astream_events.call_args.kwargs["version"],
+            "v2",
+        )
+
+
+    async def test_aresume_events_forwards_command(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        async def event_stream():
+            yield {
+                "event": "on_chain_end",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=event_stream(),
+        ) as graph_astream_events:
+            result = [
+                event
+                async for event in runtime.aresume_events(
+                    {"approved": True},
+                    thread_id="async-events-thread-002",
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "event": "on_chain_end",
+                },
+            ],
+        )
+
+        command = graph_astream_events.call_args.args[0]
+        runtime_config = graph_astream_events.call_args.kwargs["config"]
+
+        self.assertIsInstance(command, Command)
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-events-thread-002",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
