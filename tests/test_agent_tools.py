@@ -965,5 +965,32 @@ class AgentToolNodeTests(unittest.TestCase):
             )
 
 
+    def test_agent_plan_rejects_invalid_tool_arguments(self):
+        model = FakePlanningModel(
+            '{"tool_name": "python_executor", '
+            '"arguments": {}}'
+        )
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = agent_plan_node(
+                {
+                    "input": "请执行 Python 代码",
+                },
+                config={},
+            )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "参数无效",
+            result["final_report"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

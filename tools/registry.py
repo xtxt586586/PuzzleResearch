@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable,Mapping
+import inspect
 
 
 ToolHandler = Callable[..., Any]
@@ -17,6 +18,34 @@ class ToolDefinition:
     description: str
     handler: ToolHandler
 
+
+    def validate_arguments(
+            self,
+            arguments: Mapping[str,Any] | None = None,
+    ) -> dict[str,Any]:
+        """
+        校验工具参数。
+
+        bind 会检查：
+        - 必填参数是否缺失；
+        - 是否传入工具不接受的参数。
+        """
+
+        payload = dict(arguments or {})
+
+        try:
+            inspect.signature(
+                self.handler,
+            ).bind(**payload)
+
+        except Exception as exc:
+            raise ValueError(
+                f"工具「{self.name}」参数无效：{exc}"
+            ) from exc
+
+        return payload
+
+
     def invoke(
             self,
             arguments: Mapping[str,Any] | None = None,
@@ -25,7 +54,8 @@ class ToolDefinition:
         使用字典参数调用工具。
         """
 
-        payload = dict(arguments or {})
+        payload = self.validate_arguments(arguments)
+
         return self.handler(**payload)
 
 

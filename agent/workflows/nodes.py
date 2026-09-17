@@ -1817,7 +1817,7 @@ def agent_plan_node(
 
     try:
         tool = registry.get(tool_name)
-    except KeyError as exc:
+    except (KeyError,ValueError) as exc:
         message = str(exc)
 
         return {
@@ -1847,6 +1847,21 @@ def agent_plan_node(
             "is_complete": False,
             "status": "failed",
         }
+
+
+    try:
+        tool.validate_arguments(arguments)
+    except ValueError as exc:
+        message = str(exc)
+
+        return {
+            "final_report": message,
+            "errors": [message],
+            "last_error": message,
+            "is_complete": False,
+            "status": "failed",
+        }
+
 
     pending_call = {
         "tool_name": tool.name,
@@ -1974,7 +1989,8 @@ def agent_tool_node(
     try:
         registry = _get_agent_tool_registry(config)
         tool = registry.get(tool_name)
-    except (KeyError, TypeError) as exc:
+        tool.validate_arguments(arguments)
+    except (KeyError, TypeError,ValueError) as exc:
         message = str(exc)
 
         return {
