@@ -210,5 +210,266 @@ class AgentRuntimeAsyncTests(
         )
 
 
+    def test_get_state_forwards_thread_and_subgraphs(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        with patch.object(
+            runtime.graph,
+            "get_state",
+            return_value={
+                "values": {
+                    "status": "running",
+                },
+            },
+        ) as graph_get_state:
+            result = runtime.get_state(
+                thread_id="state-thread-001",
+                subgraphs=True,
+            )
+
+        self.assertEqual(
+            result["values"]["status"],
+            "running",
+        )
+
+        runtime_config = graph_get_state.call_args.args[0]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "state-thread-001",
+        )
+        self.assertTrue(
+            graph_get_state.call_args.kwargs["subgraphs"],
+        )
+
+
+    def test_get_state_requires_checkpointer(self):
+        runtime = AgentRuntime()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "checkpointer",
+        ):
+            runtime.get_state(
+                thread_id="state-thread-002",
+            )
+
+
+    def test_get_state_history_forwards_limit(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        snapshots = [
+            {"id": "snapshot-1"},
+            {"id": "snapshot-2"},
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "get_state_history",
+            return_value=iter(snapshots),
+        ) as graph_get_history:
+            result = list(
+                runtime.get_state_history(
+                    thread_id="history-thread-001",
+                    limit=2,
+                )
+            )
+
+        self.assertEqual(
+            result,
+            snapshots,
+        )
+
+        runtime_config = graph_get_history.call_args.args[0]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "history-thread-001",
+        )
+        self.assertEqual(
+            graph_get_history.call_args.kwargs["limit"],
+            2,
+        )
+
+
+    def test_stream_forwards_payload_and_mode(self):
+        runtime = AgentRuntime()
+
+        chunks = [
+            {
+                "status": "running",
+            },
+            {
+                "status": "completed",
+            },
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "stream",
+            return_value=iter(chunks),
+        ) as graph_stream:
+            result = list(
+                runtime.stream(
+                    "流式测试请求",
+                    thread_id="stream-thread-001",
+                    stream_mode="updates",
+                )
+            )
+
+        self.assertEqual(
+            result,
+            chunks,
+        )
+
+        payload = graph_stream.call_args.args[0]
+        runtime_config = graph_stream.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "流式测试请求",
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "stream-thread-001",
+        )
+        self.assertEqual(
+            graph_stream.call_args.kwargs["stream_mode"],
+            "updates",
+        )
+
+
+    async def test_aget_state_forwards_thread(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        with patch.object(
+            runtime.graph,
+            "aget_state",
+            new_callable=AsyncMock,
+            return_value={
+                "values": {
+                    "status": "completed",
+                },
+            },
+        ) as graph_aget_state:
+            result = await runtime.aget_state(
+                thread_id="async-state-thread-001",
+            )
+
+        self.assertEqual(
+            result["values"]["status"],
+            "completed",
+        )
+
+        runtime_config = graph_aget_state.call_args.args[0]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-state-thread-001",
+        )
+
+
+    async def test_aget_state_history_forwards_limit(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        async def snapshot_stream():
+            yield {"id": "async-snapshot-1"}
+            yield {"id": "async-snapshot-2"}
+
+        with patch.object(
+            runtime.graph,
+            "aget_state_history",
+            return_value=snapshot_stream(),
+        ) as graph_aget_history:
+            result = [
+                snapshot
+                async for snapshot in runtime.aget_state_history(
+                    thread_id="async-history-thread-001",
+                    limit=2,
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {"id": "async-snapshot-1"},
+                {"id": "async-snapshot-2"},
+            ],
+        )
+
+        runtime_config = graph_aget_history.call_args.args[0]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-history-thread-001",
+        )
+        self.assertEqual(
+            graph_aget_history.call_args.kwargs["limit"],
+            2,
+        )
+
+
+    async def test_astream_forwards_payload_and_mode(self):
+        runtime = AgentRuntime()
+
+        async def chunk_stream():
+            yield {
+                "status": "running",
+            }
+            yield {
+                "status": "completed",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream",
+            return_value=chunk_stream(),
+        ) as graph_astream:
+            result = [
+                chunk
+                async for chunk in runtime.astream(
+                    "异步流式测试请求",
+                    thread_id="async-stream-thread-001",
+                    stream_mode="updates",
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "status": "running",
+                },
+                {
+                    "status": "completed",
+                },
+            ],
+        )
+
+        payload = graph_astream.call_args.args[0]
+        runtime_config = graph_astream.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "异步流式测试请求",
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-stream-thread-001",
+        )
+        self.assertEqual(
+            graph_astream.call_args.kwargs["stream_mode"],
+            "updates",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

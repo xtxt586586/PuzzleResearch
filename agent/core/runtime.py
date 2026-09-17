@@ -52,6 +52,18 @@ class AgentRuntime:
             checkpointer=checkpointer,
         )
 
+
+    def _require_checkpointer(
+            self,
+            operation: str,
+    ) -> None:
+        if self._checkpointer is None:
+            raise ValueError(
+                f"{operation} 需要配置 checkpointer"
+            )
+
+
+
     def _build_config(
             self,
             *,
@@ -161,7 +173,7 @@ class AgentRuntime:
         )
 
 
-    def ainvoke(
+    async def ainvoke(
             self,
             user_input: str,
             *,
@@ -183,7 +195,7 @@ class AgentRuntime:
             thread_id=thread_id,
         )
 
-        return self.graph.ainvoke(
+        return await self.graph.ainvoke(
             payload,
             config=runtime_config,
         )
@@ -200,10 +212,7 @@ class AgentRuntime:
         恢复一个需要审批或人工介入的线程。
         """
 
-        if self._checkpointer is None:
-            raise ValueError(
-                "resume 需要配置 checkpointer"
-            )
+        self._require_checkpointer("resume")
 
         runtime_config = self._build_config(
             config=config,
@@ -226,10 +235,7 @@ class AgentRuntime:
         异步恢复一个需要审批或人工介入的线程。
         """
 
-        if self._checkpointer is None:
-            raise ValueError(
-                "aresume 需要配置 checkpointer"
-            )
+        self._require_checkpointer("aresume")
 
         runtime_config = self._build_config(
             config=config,
@@ -240,3 +246,162 @@ class AgentRuntime:
             Command(resume=resume_value),
             config=runtime_config,
         )
+
+
+    def get_state(
+            self,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+            subgraphs: bool = False,
+    ) -> Any:
+        """
+        查询指定线程的最新状态快照。
+        """
+
+        self._require_checkpointer("get_state")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return self.graph.get_state(
+            runtime_config,
+            subgraphs=subgraphs,
+        )
+
+
+
+    async def aget_state(
+            self,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+            subgraphs: bool = False,
+    ) -> Any:
+        """
+        异步查询指定线程的最新状态快照。
+        """
+
+        self._require_checkpointer("aget_state")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return await self.graph.aget_state(
+            runtime_config,
+            subgraphs=subgraphs,
+        )
+
+
+    def get_state_history(
+            self,
+            *,
+            thread_id: str,
+            limit: int | None = None,
+            config: Mapping[str, Any] | None = None,
+    ):
+        """
+        查询指定线程的历史状态快照。
+        """
+
+        self._require_checkpointer("get_state_history")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return self.graph.get_state_history(
+            runtime_config,
+            limit=limit,
+        )
+
+
+    async def aget_state_history(
+            self,
+            *,
+            thread_id: str,
+            limit: int | None = None,
+            config: Mapping[str, Any] | None = None,
+    ):
+        """
+        异步查询指定线程的历史状态快照。
+        """
+
+        self._require_checkpointer("aget_state_history")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        async for snapshot in self.graph.aget_state_history(
+            runtime_config,
+            limit=limit,
+        ):
+            yield snapshot
+
+
+    def stream(
+            self,
+            user_input: str,
+            *,
+            messages: list[Any] | None = None,
+            thread_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+            stream_mode: Any = "values",
+    ):
+        """
+        流式执行 Agent 请求。
+        """
+
+        payload = self._build_payload(
+            user_input,
+            messages,
+        )
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        return self.graph.stream(
+            payload,
+            config=runtime_config,
+            stream_mode=stream_mode,
+        )
+
+
+    async def astream(
+            self,
+            user_input: str,
+            *,
+            messages: list[Any] | None = None,
+            thread_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+            stream_mode: Any = "values",
+    ):
+        """
+        异步流式执行 Agent 请求。
+        """
+
+        payload = self._build_payload(
+            user_input,
+            messages,
+        )
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        async for chunk in self.graph.astream(
+            payload,
+            config=runtime_config,
+            stream_mode=stream_mode,
+        ):
+            yield chunk
