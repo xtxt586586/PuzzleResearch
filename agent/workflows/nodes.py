@@ -1678,9 +1678,12 @@ def agent_plan_node(
         for blocked_tool_name in profile.blocked_tools:
             enabled_tools[blocked_tool_name] = False
 
-
     tool_descriptions = "\n".join(
-        f"- {tool.name}: {tool.description}"
+        (
+            f"- {tool.name}"
+            f"({tool.format_argument_contract()}): "
+            f"{tool.description}"
+        )
         for tool in available_tools
         if enabled_tools.get(tool.name, False)
     )

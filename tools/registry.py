@@ -18,6 +18,38 @@ class ToolDefinition:
     description: str
     handler: ToolHandler
 
+    def format_argument_contract(self) -> str:
+        """
+        生成人类和模型都容易理解的参数契约。
+        """
+
+        try:
+            signature = inspect.signature(self.handler)
+        except (TypeError, ValueError):
+            return "参数信息不可用"
+
+        parts: list[str] = []
+
+        for parameter in signature.parameters.values():
+            if parameter.kind in {
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            }:
+                continue
+
+            if parameter.default is inspect.Parameter.empty:
+                parts.append(
+                    f"{parameter.name} (必填)"
+                )
+            else:
+                parts.append(
+                    f"{parameter.name} "
+                    f"(可选，默认={parameter.default!r})"
+                )
+
+        return ", ".join(parts) or "无参数"
+
+
 
     def validate_arguments(
             self,

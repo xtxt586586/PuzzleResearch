@@ -22,6 +22,18 @@ class FakePlanningModel:
             },
         )()
 
+class CapturingPlanningModel(FakePlanningModel):
+    def __init__(self, content):
+        super().__init__(content)
+        self.messages = None
+
+    def invoke(self, messages, config=None):
+        self.messages = messages
+        return super().invoke(
+            messages,
+            config=config,
+        )
+
 
 class AgentToolNodeTests(unittest.TestCase):
     def test_agent_plan_creates_python_tool_call(self):
@@ -989,6 +1001,58 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertIn(
             "参数无效",
             result["final_report"],
+        )
+
+
+    def test_agent_plan_includes_tool_argument_contract(self):
+        def echo_tool(text: str) -> dict[str, str]:
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        model = CapturingPlanningModel(
+            '{"tool_name": "echo", '
+            '"arguments": {"text": "hello"}}'
+        )
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = agent_plan_node(
+                {
+                    "input": "请返回 hello",
+                },
+                config={
+                    "configurable": {
+                        "tool_registry": registry,
+                    }
+                },
+            )
+
+        self.assertEqual(
+            result["status"],
+            "running",
+        )
+        self.assertIsNotNone(model.messages)
+        self.assertIn(
+            "echo(text (必填))",
+            model.messages[0].content,
+        )
+        self.assertIn(
+            "返回输入文本",
+            model.messages[0].content,
         )
 
 

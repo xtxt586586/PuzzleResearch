@@ -128,5 +128,40 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(attempts["count"], 0)
 
 
+    def test_tool_argument_contract_is_described(self):
+        def search(
+                query: str,
+                limit: int = 5,
+        ) -> str:
+            return f"{query}:{limit}"
+
+        tool = ToolDefinition(
+            name="search",
+            description="搜索内容",
+            handler=search,
+        )
+
+        self.assertEqual(
+            tool.format_argument_contract(),
+            "query (必填), limit (可选，默认=5)",
+        )
+
+
+    def test_no_argument_tool_has_empty_contract(self):
+        def ping() -> str:
+            return "pong"
+
+        tool = ToolDefinition(
+            name="ping",
+            description="健康检查",
+            handler=ping,
+        )
+
+        self.assertEqual(
+            tool.format_argument_contract(),
+            "无参数",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
