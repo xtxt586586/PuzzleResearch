@@ -437,5 +437,47 @@ class CoreContractTests(unittest.TestCase):
         )
 
 
+    def test_graph_preserves_cancelled_request(self):
+        result = create_research_graph().invoke(
+            {
+                "input": "请执行一个任务",
+                "messages": [],
+                "status": "running",
+                "is_cancelled": True,
+                "cancel_token_id": "cancel-001",
+            }
+        )
+
+        self.assertEqual(
+            result["status"],
+            "cancelled",
+        )
+        self.assertFalse(
+            result["is_complete"],
+        )
+
+
+    def test_finalize_preserves_cancelled_status(self):
+        result = finalize_node(
+            {
+                "status": "cancelled",
+                "is_cancelled": True,
+                "final_report": "任务已取消",
+            }
+        )
+
+        self.assertEqual(
+            result["status"],
+            "cancelled",
+        )
+        self.assertFalse(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["final_report"],
+            "任务已取消",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

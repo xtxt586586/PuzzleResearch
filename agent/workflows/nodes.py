@@ -1587,6 +1587,17 @@ def agent_plan_node(
     该节点只负责规划，不执行工具。
     """
 
+    if state.get("is_cancelled"):
+        message = "Agent 任务已取消。"
+
+        return {
+            "pending_tool_calls": [],
+            "final_report": message,
+            "is_complete": False,
+            "status": "cancelled",
+        }
+
+
     user_input = state.get("input","").strip()
 
     if not user_input:
@@ -1914,6 +1925,18 @@ def agent_tool_node(
         "cancelled",
     }:
         return {}
+
+    if state.get("is_cancelled"):
+        message = "工具调用已取消。"
+
+        return {
+            "pending_tool_calls": [],
+            "final_report": message,
+            "is_complete": False,
+            "status": "cancelled",
+        }
+
+
 
     try:
         profile = _get_agent_profile(config)
@@ -2417,14 +2440,21 @@ def finalize_node(
         or bool(state.get("needs_clarification"))
     )
 
-    if current_status in {
-        "failed",
-        "cancelled",
-    }:
+    if current_status == "failed":
         return {
             "final_report": report,
             "is_complete": False,
             "status": "failed",
+        }
+
+    if (
+        current_status == "cancelled"
+        or state.get("is_cancelled")
+    ):
+        return {
+            "final_report": report,
+            "is_complete": False,
+            "status": "cancelled",
         }
 
     return {

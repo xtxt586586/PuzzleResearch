@@ -85,6 +85,10 @@ def create_research_graph(checkpointer=None):
         启用工具审批时，会在执行前通过 interrupt 暂停。
         """
 
+        if state.get("is_cancelled"):
+            return "finalize"
+
+
         route = state.get("route", "clarify")
 
         allowed_routes = {
@@ -120,10 +124,13 @@ def create_research_graph(checkpointer=None):
 
         current_status = state.get("status")
 
-        if current_status in {
-            "failed",
-            "cancelled",
-        }:
+        if (
+            current_status in {
+                "failed",
+                "cancelled",
+            }
+            or state.get("is_cancelled")
+        ):
             return "finalize"
 
         if state.get("agent_finished"):
@@ -138,10 +145,13 @@ def create_research_graph(checkpointer=None):
 
         current_status = state.get("status")
 
-        if current_status in {
-            "failed",
-            "cancelled",
-        }:
+        if (
+            current_status in {
+                "failed",
+                "cancelled",
+            }
+            or state.get("is_cancelled")
+        ):
             return "finalize"
 
         if state.get("agent_finished"):
@@ -179,6 +189,7 @@ def create_research_graph(checkpointer=None):
             "web_plan": "web_plan",
             "deep_plan": "deep_plan",
             "agent_plan": "agent_plan",
+            "finalize": "finalize",
         },
     )
 

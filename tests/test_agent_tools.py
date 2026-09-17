@@ -1056,5 +1056,60 @@ class AgentToolNodeTests(unittest.TestCase):
         )
 
 
+    def test_agent_plan_stops_when_cancelled(self):
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task"
+        ) as model_factory:
+            result = agent_plan_node(
+                {
+                    "input": "请执行 Python 代码",
+                    "is_cancelled": True,
+                },
+                config={},
+            )
+
+        self.assertEqual(
+            result["status"],
+            "cancelled",
+        )
+        self.assertFalse(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["pending_tool_calls"],
+            [],
+        )
+        model_factory.assert_not_called()
+
+
+    def test_agent_tool_does_not_execute_when_cancelled(self):
+        result = agent_tool_node(
+            {
+                "is_cancelled": True,
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "python_executor",
+                        "arguments": {
+                            "code": "print(42)",
+                        },
+                    }
+                ],
+            },
+            config={},
+        )
+
+        self.assertEqual(
+            result["status"],
+            "cancelled",
+        )
+        self.assertFalse(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["pending_tool_calls"],
+            [],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
