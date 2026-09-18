@@ -1333,6 +1333,88 @@ class AgentToolNodeTests(unittest.TestCase):
             0,
         )
 
+    def test_agent_plan_and_execution_reject_same_invalid_argument_type(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo_text(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo_text",
+                    description="返回输入文本",
+                    handler=echo_text,
+                ),
+            ]
+        )
+
+        model = FakePlanningModel(
+            '{"tool_name": "echo_text", '
+            '"arguments": {"text": 42}}'
+        )
+
+        tool_config = {
+            "configurable": {
+                "tool_registry": registry,
+            }
+        }
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            plan_result = agent_plan_node(
+                {
+                    "input": "请返回文本",
+                },
+                config=tool_config,
+            )
+
+        self.assertEqual(
+            plan_result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "类型无效",
+            plan_result["final_report"],
+        )
+
+        execution_result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "echo_text",
+                        "arguments": {
+                            "text": 42,
+                        },
+                    },
+                ],
+                "tool_approved": True,
+            },
+            config=tool_config,
+        )
+
+        self.assertEqual(
+            execution_result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "类型无效",
+            execution_result["final_report"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            0,
+        )
+
 
 
 if __name__ == "__main__":

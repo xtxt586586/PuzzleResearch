@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable,Mapping
+from typing import Any, Callable,Mapping,Union,get_args,get_origin,get_type_hints
 import inspect
+import types
 
 
 ToolHandler = Callable[..., Any]
@@ -17,6 +18,66 @@ class ToolDefinition:
     name: str
     description: str
     handler: ToolHandler
+
+
+    @staticmethod
+    def _matches_annotation(
+            value: str,
+            annotation: Any,
+    ) -> bool:
+        """
+        判断运行时参数是否符合类型标注。
+
+        对无法解析的复杂类型只做结构校验，
+        不阻塞工具调用。
+        """
+
+        if (
+            annotation is inspect.Parameter.empty
+            or annotation is Any
+        ):
+            return True
+
+        if annotation is None:
+            return value is None
+
+        if annotation is bool:
+            return type(value) is bool
+
+        if annotation is float:
+            return type(value) in {
+                int,
+                float,
+            }
+
+        origin = get_origin(annotation)
+
+        if origin is {
+            Union,
+            types.UnionType,
+        }:
+            return any(
+                ToolDefinition._matches_annotation(
+                    value,
+                    item,
+                )
+                for item in get_args(annotation)
+            )
+
+        if origin is not None:
+            try:
+                return isinstance(value,origin)
+
+            except TypeError:
+                return True
+
+        try:
+            return isinstance(value,annotation)
+
+        except TypeError:
+            return True
+
+
 
 
     def argument_schema(self) -> list[dict[str,Any]]:
@@ -123,17 +184,59 @@ class ToolDefinition:
         """
         校验工具参数。
 
-        bind 会检查：
+        校验内容包括：
+
         - 必填参数是否缺失；
-        - 是否传入工具不接受的参数。
+        - 是否传入工具不接受的参数；
+        - 已提供参数是否符合类型标注。
         """
 
         payload = dict(arguments or {})
 
         try:
-            inspect.signature(
-                self.handler,
-            ).bind(**payload)
+
+            signature = inspect.signature(self.handler,)
+
+            bound = signature.bind(**payload)
+
+            try:
+                type_hints = get_type_hints(self.handler,)
+
+            except (TypeError, NameError,AttributeError,):
+                type_hints = {}
+
+            for parameter_name,value in bound.arguments.items():
+                parameter = signature.parameters[parameter_name]
+
+                if parameter.kind in {
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                }:
+                    continue
+
+                annotation = type_hints.get(
+                    parameter_name,
+                    parameter.annotation,
+                )
+
+                if annotation is inspect.Parameter.empty:
+                    continue
+
+                if not self._matches_annotation(
+                    value,
+                    annotation,
+                ):
+                    annotation_name = getattr(
+                        annotation,
+                        "__name__",
+                        str(annotation),
+                    )
+
+                    raise TypeError(
+                        f"参数「{parameter_name}」类型无效："
+                        f"期望 {annotation_name}，"
+                        f"实际为 {type(value).__name__}"
+                    )
 
         except Exception as exc:
             raise ValueError(
@@ -141,6 +244,7 @@ class ToolDefinition:
             ) from exc
 
         return payload
+
 
 
     def invoke(

@@ -128,6 +128,44 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(attempts["count"], 0)
 
 
+    def test_wrong_argument_type_is_rejected(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def add_numbers(left: int, right: int) -> int:
+            attempts["count"] += 1
+            return left + right
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="add",
+                    description="计算两个数的和",
+                    handler=add_numbers,
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "类型无效",
+        ):
+            registry.invoke(
+                "add",
+                {
+                    "left": "1",
+                    "right": 2,
+                },
+            )
+
+        self.assertEqual(
+            attempts["count"],
+            0,
+        )
+
+
+
     def test_tool_argument_contract_is_described(self):
         def search(
                 query: str,
@@ -287,6 +325,35 @@ class ToolRegistryTests(unittest.TestCase):
                     "default": None,
                 },
             ],
+        )
+
+
+    def test_integer_is_accepted_for_float_argument(self):
+        def measure(
+                timeout_seconds: float,
+        ) -> float:
+            return timeout_seconds
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="measure",
+                    description="测试浮点参数",
+                    handler=measure,
+                ),
+            ]
+        )
+
+        result = registry.invoke(
+            "measure",
+            {
+                "timeout_seconds": 2,
+            },
+        )
+
+        self.assertEqual(
+            result,
+            2,
         )
 
 
