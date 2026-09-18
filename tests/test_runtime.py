@@ -1,12 +1,13 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from agent.core.profile import AgentProfile
 from agent.core.runtime import AgentRuntime
-from tools.registry import ToolRegistry
+from tools.registry import ToolDefinition, ToolRegistry
 
 
 class AgentRuntimeTests(unittest.TestCase):
@@ -168,6 +169,66 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertFalse(
             result[0]["enabled"],
         )
+
+    def test_describe_tools_uses_custom_registry(self):
+        def echo(message: str) -> str:
+            return message
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="回显文本",
+                    handler=echo,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            registry=registry,
+        )
+
+        result = runtime.describe_tools()
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "name": "echo",
+                    "description": "回显文本",
+                    "parameters": [
+                        {
+                            "name": "message",
+                            "required": True,
+                            "annotation": "str",
+                        },
+                    ],
+                    "enabled": True,
+                },
+            ],
+        )
+
+    def test_describe_tools_blocklist_overrides_enabled_tools(self):
+        profile = AgentProfile(
+            name="blocked-profile",
+            enabled_tools=frozenset({"python_executor"}),
+            blocked_tools=frozenset({"python_executor"}),
+        )
+
+        runtime = AgentRuntime(
+            profile=profile,
+        )
+
+        result = runtime.describe_tools()
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+        self.assertFalse(
+            result[0]["enabled"],
+        )
+
 
     def test_get_state_forwards_thread_and_subgraphs(self):
         runtime = AgentRuntime(
