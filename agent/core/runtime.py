@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable,AsyncIterable
 
 import uuid
 from typing import Any,Mapping
@@ -9,6 +10,7 @@ from langgraph.types import Command
 from agent.core.graph import create_research_graph
 from agent.core.profile import AgentProfile
 from tools.registry import ToolRegistry
+from agent.core.events import RuntimeEvent
 
 
 class AgentRuntime:
@@ -777,4 +779,83 @@ class AgentRuntime:
             version=version,
             **kwargs,
         ):
+            yield event
+
+
+    def stream_runtime_events(
+            self,
+            user_input: str,
+            *,
+            messages: list[Any] | None = None,
+            thread_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            event_types: set[str] | None = None,
+            **kwargs: Any,
+    ) -> Iterable[RuntimeEvent]:
+        """
+        同步返回标准化 RuntimeEvent。
+        """
+
+        allowed_events = (
+            set(event_types)
+            if event_types is not None
+            else None
+        )
+
+        for raw_event in self.stream_events(
+            user_input,
+            messages=messages,
+            thread_id=thread_id,
+            config=config,
+            version=version,
+            **kwargs,
+        ):
+            event = RuntimeEvent.from_raw(raw_event)
+
+            if (
+                allowed_events is not None
+                and event.event not in allowed_events
+            ):
+                continue
+
+            yield event
+
+    async def astream_runtime_events(
+            self,
+            user_input: str,
+            *,
+            messages: list[Any] | None = None,
+            thread_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            event_types: set[str] | None = None,
+            **kwargs: Any,
+    ) -> AsyncIterable[RuntimeEvent]:
+        """
+        异步返回标准化 RuntimeEvent。
+        """
+
+        allowed_events = (
+            set(event_types)
+            if event_types is not None
+            else None
+        )
+
+        async for raw_event in self.astream_events(
+            user_input,
+            messages=messages,
+            thread_id=thread_id,
+            config=config,
+            version=version,
+            **kwargs,
+        ):
+            event = RuntimeEvent.from_raw(raw_event)
+
+            if (
+                allowed_events is not None
+                and event.event not in allowed_events
+            ):
+                continue
+
             yield event
