@@ -45,8 +45,6 @@ class ApprovalPlanningModel:
         )()
 
 
-
-
 class AgentRuntimeTests(unittest.TestCase):
     def test_invoke_injects_profile_registry_and_thread(self):
         profile = AgentProfile(
@@ -257,6 +255,79 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(
             model.calls,
             2,
+        )
+
+
+    def test_cancel_stops_paused_tool_thread_and_persists_state(self):
+        model = ApprovalPlanningModel()
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="cancel-profile",
+                require_tool_approval=True,
+            ),
+        )
+
+        thread_id = "runtime-cancel-sync-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = runtime.invoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+
+            self.assertEqual(
+                paused_result["status"],
+                "paused",
+            )
+            self.assertEqual(
+                model.calls,
+                1,
+            )
+
+            cancelled_snapshot = runtime.cancel(
+                thread_id=thread_id,
+                cancel_token_id="cancel-sync-001",
+            )
+
+        self.assertEqual(
+            cancelled_snapshot.values["status"],
+            "cancelled",
+        )
+        self.assertTrue(
+            cancelled_snapshot.values["is_cancelled"],
+        )
+
+        summary = runtime.inspect_thread(
+            thread_id=thread_id,
+        )
+
+        self.assertEqual(
+            summary["status"],
+            "cancelled",
+        )
+        self.assertTrue(
+            summary["is_cancelled"],
+        )
+        self.assertEqual(
+            summary["cancel_token_id"],
+            "cancel-sync-001",
+        )
+        self.assertEqual(
+            summary["pending_tool_count"],
+            0,
+        )
+        self.assertEqual(
+            summary["tool_call_count"],
+            0,
+        )
+        self.assertEqual(
+            model.calls,
+            1,
         )
 
 
@@ -988,6 +1059,81 @@ class AgentRuntimeAsyncTests(
         self.assertEqual(
             model.calls,
             2,
+        )
+
+
+    async def test_acancel_stops_paused_tool_thread_and_persists_state(
+            self,
+    ):
+        model = ApprovalPlanningModel()
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="async-cancel-profile",
+                require_tool_approval=True,
+            ),
+        )
+
+        thread_id = "runtime-cancel-async-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = await runtime.ainvoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+
+            self.assertEqual(
+                paused_result["status"],
+                "paused",
+            )
+            self.assertEqual(
+                model.calls,
+                1,
+            )
+
+            cancelled_snapshot = await runtime.acancel(
+                thread_id=thread_id,
+                cancel_token_id="cancel-async-001",
+            )
+
+        self.assertEqual(
+            cancelled_snapshot.values["status"],
+            "cancelled",
+        )
+        self.assertTrue(
+            cancelled_snapshot.values["is_cancelled"],
+        )
+
+        summary = await runtime.ainspect_thread(
+            thread_id=thread_id,
+        )
+
+        self.assertEqual(
+            summary["status"],
+            "cancelled",
+        )
+        self.assertTrue(
+            summary["is_cancelled"],
+        )
+        self.assertEqual(
+            summary["cancel_token_id"],
+            "cancel-async-001",
+        )
+        self.assertEqual(
+            summary["pending_tool_count"],
+            0,
+        )
+        self.assertEqual(
+            summary["tool_call_count"],
+            0,
+        )
+        self.assertEqual(
+            model.calls,
+            1,
         )
 
 
