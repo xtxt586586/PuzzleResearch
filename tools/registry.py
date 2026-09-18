@@ -22,7 +22,7 @@ class ToolDefinition:
 
     @staticmethod
     def _matches_annotation(
-            value: str,
+            value: Any,
             annotation: Any,
     ) -> bool:
         """
@@ -44,6 +44,9 @@ class ToolDefinition:
         if annotation is bool:
             return type(value) is bool
 
+        if annotation is int:
+            return type(value) is int
+
         if annotation is float:
             return type(value) in {
                 int,
@@ -52,7 +55,7 @@ class ToolDefinition:
 
         origin = get_origin(annotation)
 
-        if origin is {
+        if origin in {
             Union,
             types.UnionType,
         }:

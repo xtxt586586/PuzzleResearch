@@ -357,5 +357,80 @@ class ToolRegistryTests(unittest.TestCase):
         )
 
 
+    def test_union_argument_accepts_allowed_types(self):
+        def normalize(
+                value: str | None,
+        ) -> str:
+            return value or "empty"
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="normalize",
+                    description="规范化文本",
+                    handler=normalize,
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            registry.invoke(
+                "normalize",
+                {
+                    "value": "hello",
+                },
+            ),
+            "hello",
+        )
+
+        self.assertEqual(
+            registry.invoke(
+                "normalize",
+                {
+                    "value": None,
+                },
+            ),
+            "empty",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "类型无效",
+        ):
+            registry.invoke(
+                "normalize",
+                {
+                    "value": 42,
+                },
+            )
+
+        def test_bool_is_not_accepted_as_int(self):
+            def repeat(
+                    count: int,
+            ) -> int:
+                return count
+
+            registry = ToolRegistry(
+                [
+                    ToolDefinition(
+                        name="repeat",
+                        description="测试整数参数",
+                        handler=repeat,
+                    ),
+                ]
+            )
+
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "类型无效",
+            ):
+                registry.invoke(
+                    "repeat",
+                    {
+                        "count": True,
+                    },
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
