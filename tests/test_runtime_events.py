@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from agent.core.events import RuntimeEvent
 from agent.core.runtime import AgentRuntime
@@ -52,7 +52,6 @@ class RuntimeEventTests(unittest.TestCase):
             "completed",
         )
 
-
     def test_from_raw_handles_non_mapping(self):
         event = RuntimeEvent.from_raw(
             "unexpected-event"
@@ -66,7 +65,6 @@ class RuntimeEventTests(unittest.TestCase):
             event.data,
             "unexpected-event",
         )
-
 
     def test_to_dict_returns_json_like_data(self):
         event = RuntimeEvent(
@@ -96,6 +94,50 @@ class RuntimeEventTests(unittest.TestCase):
         self.assertEqual(
             result["tags"],
             ["route"],
+        )
+
+    def test_tool_events_are_read_from_nested_output(self):
+        event = RuntimeEvent.from_raw(
+            {
+                "event": "on_chain_end",
+                "name": "agent_tool",
+                "data": {
+                    "output": {
+                        "tool_events": [
+                            {
+                                "event_type": "tool_started",
+                                "tool_name": "python_executor",
+                                "call_count": 1,
+                                "attempt": 1,
+                            },
+                            {
+                                "event_type": "tool_completed",
+                                "tool_name": "python_executor",
+                                "call_count": 1,
+                                "attempt": 1,
+                            },
+                        ],
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(
+            event.tool_events,
+            [
+                {
+                    "event_type": "tool_started",
+                    "tool_name": "python_executor",
+                    "call_count": 1,
+                    "attempt": 1,
+                },
+                {
+                    "event_type": "tool_completed",
+                    "tool_name": "python_executor",
+                    "call_count": 1,
+                    "attempt": 1,
+                },
+            ],
         )
 
 
@@ -146,51 +188,6 @@ class RuntimeEventStreamTests(unittest.TestCase):
             "finalize",
         )
 
-
-    def test_tool_events_are_read_from_nested_output(self):
-        event = RuntimeEvent.from_raw(
-            {
-                "event": "on_chain_end",
-                "name": "agent_tool",
-                "data": {
-                    "output": {
-                        "tool_events": [
-                            {
-                                "event_type": "tool_started",
-                                "tool_name": "python_executor",
-                                "call_count": 1,
-                                "attempt": 1,
-                            },
-                            {
-                                "event_type": "tool_completed",
-                                "tool_name": "python_executor",
-                                "call_count": 1,
-                                "attempt": 1,
-                            },
-                        ],
-                    },
-                },
-            }
-        )
-
-        self.assertEqual(
-            event.tool_events,
-            [
-                {
-                    "event_type": "tool_started",
-                    "tool_name": "python_executor",
-                    "call_count": 1,
-                    "attempt": 1,
-                },
-                {
-                    "event_type": "tool_completed",
-                    "tool_name": "python_executor",
-                    "call_count": 1,
-                    "attempt": 1,
-                },
-            ],
-        )
-
     def test_stream_runtime_events_exposes_tool_events(self):
         runtime = AgentRuntime()
 
@@ -236,52 +233,6 @@ class RuntimeEventStreamTests(unittest.TestCase):
         self.assertEqual(
             result[0].tool_events[0]["tool_name"],
             "echo",
-        )
-
-
-
-class AsyncRuntimeEventStreamTests(
-        unittest.IsolatedAsyncioTestCase,
-):
-    async def test_astream_runtime_events_normalizes(self):
-        runtime = AgentRuntime()
-
-        async def raw_event_stream():
-            yield {
-                "event": "on_chain_start",
-                "name": "router",
-            }
-            yield {
-                "event": "on_chain_end",
-                "name": "finalize",
-            }
-
-        with patch.object(
-            runtime.graph,
-            "astream_events",
-            return_value=raw_event_stream(),
-        ):
-            result = [
-                event
-                async for event in runtime.astream_runtime_events(
-                    "异步测试事件",
-                    thread_id="runtime-event-002",
-                )
-            ]
-
-        self.assertEqual(
-            len(result),
-            2,
-        )
-        self.assertTrue(
-            all(
-                isinstance(event, RuntimeEvent)
-                for event in result
-            )
-        )
-        self.assertEqual(
-            result[-1].event,
-            "on_chain_end",
         )
 
     def test_resume_runtime_events_normalizes_and_filters(self):
@@ -334,6 +285,51 @@ class AsyncRuntimeEventStreamTests(
             "finalize",
         )
 
+
+class AsyncRuntimeEventStreamTests(
+        unittest.IsolatedAsyncioTestCase,
+):
+    async def test_astream_runtime_events_normalizes(self):
+        runtime = AgentRuntime()
+
+        async def raw_event_stream():
+            yield {
+                "event": "on_chain_start",
+                "name": "router",
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "finalize",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=raw_event_stream(),
+        ):
+            result = [
+                event
+                async for event in runtime.astream_runtime_events(
+                    "异步测试事件",
+                    thread_id="runtime-event-002",
+                )
+            ]
+
+        self.assertEqual(
+            len(result),
+            2,
+        )
+        self.assertTrue(
+            all(
+                isinstance(event, RuntimeEvent)
+                for event in result
+            )
+        )
+        self.assertEqual(
+            result[-1].event,
+            "on_chain_end",
+        )
+
     async def test_aresume_runtime_events_normalizes(self):
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -379,100 +375,6 @@ class AsyncRuntimeEventStreamTests(
             "on_chain_end",
         )
 
-
-    def test_tool_events_are_read_from_nested_output(self):
-        event = RuntimeEvent.from_raw(
-            {
-                "event": "on_chain_end",
-                "name": "agent_tool",
-                "data": {
-                    "output": {
-                        "tool_events": [
-                            {
-                                "event_type": "tool_started",
-                                "tool_name": "python_executor",
-                                "call_count": 1,
-                                "attempt": 1,
-                            },
-                            {
-                                "event_type": "tool_completed",
-                                "tool_name": "python_executor",
-                                "call_count": 1,
-                                "attempt": 1,
-                            },
-                        ],
-                    },
-                },
-            }
-        )
-
-        self.assertEqual(
-            event.tool_events,
-            [
-                {
-                    "event_type": "tool_started",
-                    "tool_name": "python_executor",
-                    "call_count": 1,
-                    "attempt": 1,
-                },
-                {
-                    "event_type": "tool_completed",
-                    "tool_name": "python_executor",
-                    "call_count": 1,
-                    "attempt": 1,
-                },
-            ],
-        )
-
-
-    def test_stream_runtime_events_exposes_tool_events(self):
-        runtime = AgentRuntime()
-
-        raw_events = [
-            {
-                "event": "on_chain_end",
-                "name": "agent_tool",
-                "data": {
-                    "output": {
-                        "tool_events": [
-                            {
-                                "event_type": "tool_cache_hit",
-                                "tool_name": "echo",
-                                "call_count": 2,
-                                "attempt": 1,
-                            },
-                        ],
-                    },
-                },
-            },
-        ]
-
-        with patch.object(
-            runtime.graph,
-            "stream_events",
-            return_value=iter(raw_events),
-        ):
-            result = list(
-                runtime.stream_runtime_events(
-                    "读取工具事件",
-                    thread_id="runtime-tool-event-001",
-                )
-            )
-
-        self.assertEqual(
-            len(result),
-            1,
-        )
-        self.assertEqual(
-            result[0].tool_events[0]["event_type"],
-            "tool_cache_hit",
-        )
-        self.assertEqual(
-            result[0].tool_events[0]["tool_name"],
-            "echo",
-        )
-
-
     async def test_astream_runtime_events_exposes_tool_events(self):
         runtime = AgentRuntime()
 
@@ -518,59 +420,6 @@ class AsyncRuntimeEventStreamTests(
             result[0].tool_events[0]["error"],
             "测试错误",
         )
-
-
-    async def test_astream_runtime_events_exposes_tool_events(self):
-        runtime = AgentRuntime()
-
-        async def raw_event_stream():
-            yield {
-                "event": "on_chain_end",
-                "name": "agent_tool",
-                "data": {
-                    "tool_events": [
-                        {
-                            "event_type": "tool_failed",
-                            "tool_name": "python_executor",
-                            "call_count": 1,
-                            "attempt": 1,
-                            "error": "测试错误",
-                        },
-                    ],
-                },
-            }
-
-        with patch.object(
-            runtime.graph,
-            "astream_events",
-            return_value=raw_event_stream(),
-        ):
-            result = [
-                event
-                async for event in runtime.astream_runtime_events(
-                    "读取异步工具事件",
-                    thread_id="runtime-tool-event-002",
-                )
-            ]
-
-        self.assertEqual(
-            len(result),
-            1,
-        )
-        self.assertEqual(
-            result[0].tool_events[0]["event_type"],
-            "tool_failed",
-        )
-        self.assertEqual(
-            result[0].tool_events[0]["error"],
-            "测试错误",
-        )
-
-
-
-
-
-
 
 
 if __name__ == "__main__":
