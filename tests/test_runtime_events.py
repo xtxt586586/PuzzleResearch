@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agent.core.events import RuntimeEvent
 from agent.core.profile import AgentProfile
 from agent.core.runtime import AgentRuntime
+from tools.registry import ToolDefinition, ToolRegistry
 
 
 class SequentialPlanningModel:
@@ -36,6 +37,39 @@ class SequentialPlanningModel:
 
         self.calls += 1
         return response
+
+
+class FailingToolEventPlanningModel:
+    def __init__(self):
+        self.calls = 0
+
+    def with_structured_output(self, schema):
+        class StructuredRouter:
+            def invoke(self, messages, config=None):
+                return {
+                    "route": "agent",
+                    "reasoning": "测试请求需要调用工具",
+                    "confidence": 1.0,
+                    "suggested_queries": [],
+                    "clarification_question": "",
+                }
+
+        return StructuredRouter()
+
+    def invoke(self, messages, config=None):
+        self.calls += 1
+
+        return type(
+            "FakeResponse",
+            (),
+            {
+                "content": (
+                    '{"action": "tool", '
+                    '"tool_name": "event_failing_tool", '
+                    '"arguments": {}}'
+                ),
+            },
+        )()
 
 
 class RuntimeEventTests(unittest.TestCase):
@@ -332,6 +366,103 @@ class RuntimeEventStreamTests(unittest.TestCase):
         self.assertEqual(
             model.calls,
             2,
+        )
+
+
+    def test_stream_runtime_events_propagates_tool_failure(self):
+        def event_failing_tool() -> dict[str, str]:
+            return {
+                "output": "",
+                "error": "事件流工具测试错误",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="event_failing_tool",
+                    description="返回结构化错误的事件流测试工具",
+                    handler=event_failing_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-event-failure-profile",
+                enabled_tools=frozenset({"event_failing_tool"}),
+            ),
+            registry=registry,
+        )
+        model = FailingToolEventPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = list(
+                runtime.stream_runtime_events(
+                    "请调用 event_failing_tool",
+                    thread_id="runtime-failure-event-sync-001",
+                    event_types={"on_chain_end"},
+                )
+            )
+
+        self.assertTrue(result)
+        self.assertTrue(
+            all(
+                isinstance(event, RuntimeEvent)
+                for event in result
+            )
+        )
+
+        agent_tool_events = [
+            event
+            for event in result
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+
+        tool_events = agent_tool_events[0].tool_events
+
+        self.assertTrue(tool_events)
+        self.assertEqual(
+            tool_events[0]["event_type"],
+            "tool_started",
+        )
+        self.assertEqual(
+            tool_events[-1]["event_type"],
+            "tool_failed",
+        )
+        self.assertEqual(
+            tool_events[-1]["tool_name"],
+            "event_failing_tool",
+        )
+        self.assertEqual(
+            tool_events[-1]["error"],
+            "事件流工具测试错误",
+        )
+
+        finalize_events = [
+            event
+            for event in result
+            if event.name == "finalize"
+        ]
+
+        self.assertTrue(finalize_events)
+        self.assertEqual(
+            finalize_events[-1].data["output"]["status"],
+            "failed",
+        )
+        self.assertFalse(
+            finalize_events[-1].data["output"]["is_complete"],
+        )
+        self.assertEqual(
+            model.calls,
+            1,
         )
 
 
@@ -1014,6 +1145,104 @@ class AsyncRuntimeEventStreamTests(
         self.assertEqual(
             model.calls,
             2,
+        )
+
+
+    async def test_astream_runtime_events_propagates_tool_failure(self):
+        def event_failing_tool() -> dict[str, str]:
+            return {
+                "output": "",
+                "error": "异步事件流工具测试错误",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="event_failing_tool",
+                    description="返回结构化错误的异步事件流测试工具",
+                    handler=event_failing_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-async-event-failure-profile",
+                enabled_tools=frozenset({"event_failing_tool"}),
+            ),
+            registry=registry,
+        )
+        model = FailingToolEventPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = [
+                event
+                async for event in runtime.astream_runtime_events(
+                    "请调用 event_failing_tool",
+                    thread_id="runtime-failure-event-async-001",
+                    event_types={"on_chain_end"},
+                )
+            ]
+
+        self.assertTrue(result)
+        self.assertTrue(
+            all(
+                isinstance(event, RuntimeEvent)
+                for event in result
+            )
+        )
+
+        agent_tool_events = [
+            event
+            for event in result
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+
+        tool_events = agent_tool_events[0].tool_events
+
+        self.assertTrue(tool_events)
+        self.assertEqual(
+            tool_events[0]["event_type"],
+            "tool_started",
+        )
+        self.assertEqual(
+            tool_events[-1]["event_type"],
+            "tool_failed",
+        )
+        self.assertEqual(
+            tool_events[-1]["tool_name"],
+            "event_failing_tool",
+        )
+        self.assertEqual(
+            tool_events[-1]["error"],
+            "异步事件流工具测试错误",
+        )
+
+        finalize_events = [
+            event
+            for event in result
+            if event.name == "finalize"
+        ]
+
+        self.assertTrue(finalize_events)
+        self.assertEqual(
+            finalize_events[-1].data["output"]["status"],
+            "failed",
+        )
+        self.assertFalse(
+            finalize_events[-1].data["output"]["is_complete"],
+        )
+        self.assertEqual(
+            model.calls,
+            1,
         )
 
 
