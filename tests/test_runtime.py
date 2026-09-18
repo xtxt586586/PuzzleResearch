@@ -331,6 +331,71 @@ class AgentRuntimeTests(unittest.TestCase):
         )
 
 
+    def test_get_state_history_contains_paused_and_cancelled_snapshots(
+            self,
+    ):
+        model = ApprovalPlanningModel()
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="history-profile",
+                require_tool_approval=True,
+            ),
+        )
+
+        thread_id = "runtime-history-sync-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = runtime.invoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+
+            self.assertEqual(
+                paused_result["status"],
+                "paused",
+            )
+
+            runtime.cancel(
+                thread_id=thread_id,
+                cancel_token_id="history-cancel-sync-001",
+            )
+
+        history = list(
+            runtime.get_state_history(
+                thread_id=thread_id,
+                limit=10,
+            )
+        )
+
+        self.assertGreaterEqual(
+            len(history),
+            2,
+        )
+
+        statuses = [
+            snapshot.values.get("status")
+            for snapshot in history
+        ]
+
+        self.assertIn(
+            "paused",
+            statuses,
+        )
+        self.assertIn(
+            "cancelled",
+            statuses,
+        )
+        self.assertEqual(
+            history[0].values["status"],
+            "cancelled",
+        )
+
+
 
 
     def test_checkpointer_requires_thread_id(self):
@@ -1134,6 +1199,72 @@ class AgentRuntimeAsyncTests(
         self.assertEqual(
             model.calls,
             1,
+        )
+
+
+    async def test_aget_state_history_contains_paused_and_cancelled_snapshots(
+            self,
+    ):
+        model = ApprovalPlanningModel()
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="async-history-profile",
+                require_tool_approval=True,
+            ),
+        )
+
+        thread_id = "runtime-history-async-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = await runtime.ainvoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+
+            self.assertEqual(
+                paused_result["status"],
+                "paused",
+            )
+
+            await runtime.acancel(
+                thread_id=thread_id,
+                cancel_token_id="history-cancel-async-001",
+            )
+
+        history = [
+            snapshot
+            async for snapshot in runtime.aget_state_history(
+                thread_id=thread_id,
+                limit=10,
+            )
+        ]
+
+        self.assertGreaterEqual(
+            len(history),
+            2,
+        )
+
+        statuses = [
+            snapshot.values.get("status")
+            for snapshot in history
+        ]
+
+        self.assertIn(
+            "paused",
+            statuses,
+        )
+        self.assertIn(
+            "cancelled",
+            statuses,
+        )
+        self.assertEqual(
+            history[0].values["status"],
+            "cancelled",
         )
 
 
