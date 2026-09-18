@@ -10,6 +10,43 @@ from agent.core.runtime import AgentRuntime
 from tools.registry import ToolDefinition, ToolRegistry
 
 
+class ApprovalPlanningModel:
+    def __init__(self):
+        self.responses = [
+            (
+                '{"action": "tool", '
+                '"tool_name": "python_executor", '
+                '"arguments": {'
+                '"code": "print(2 + 3)"'
+                "}}"
+            ),
+            (
+                '{"action": "finish", '
+                '"final_report": "计算完成，结果是 5。"}'
+            ),
+        ]
+        self.calls = 0
+
+    def invoke(self, messages, config=None):
+        content = self.responses[
+            min(
+                self.calls,
+                len(self.responses) - 1,
+            )
+        ]
+        self.calls += 1
+
+        return type(
+            "FakeResponse",
+            (),
+            {
+                "content": content,
+            },
+        )()
+
+
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def test_invoke_injects_profile_registry_and_thread(self):
         profile = AgentProfile(
@@ -142,6 +179,87 @@ class AgentRuntimeTests(unittest.TestCase):
             result["final_report"],
             "计算完成，结果是 5。",
         )
+
+
+
+    def test_invoke_pauses_and_resume_completes_tool_approval(self):
+        model = ApprovalPlanningModel()
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="approval-profile",
+                require_tool_approval=True,
+            ),
+        )
+
+        thread_id = "runtime-approval-sync-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = runtime.invoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+
+            self.assertEqual(
+                paused_result["route"],
+                "agent",
+            )
+            self.assertEqual(
+                paused_result["status"],
+                "paused",
+            )
+            self.assertFalse(
+                paused_result["is_complete"],
+            )
+            self.assertIn(
+                "__interrupt__",
+                paused_result,
+            )
+            self.assertEqual(
+                paused_result["pending_tool_calls"][0]["tool_name"],
+                "python_executor",
+            )
+            self.assertEqual(
+                paused_result["tool_results"],
+                [],
+            )
+            self.assertEqual(
+                model.calls,
+                1,
+            )
+
+            resumed_result = runtime.resume(
+                {
+                    "approved": True,
+                },
+                thread_id=thread_id,
+            )
+
+        self.assertEqual(
+            resumed_result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            resumed_result["is_complete"],
+        )
+        self.assertEqual(
+            resumed_result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            resumed_result["tool_results"][0]["result"]["output"].strip(),
+            "5",
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
 
 
     def test_checkpointer_requires_thread_id(self):
@@ -791,6 +909,89 @@ class AgentRuntimeAsyncTests(
             runtime_config["configurable"]["thread_id"],
             "async-thread-001",
         )
+
+
+    async def test_ainvoke_pauses_and_aresume_completes_tool_approval(
+            self,
+    ):
+        model = ApprovalPlanningModel()
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="async-approval-profile",
+                require_tool_approval=True,
+            ),
+        )
+
+        thread_id = "runtime-approval-async-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = await runtime.ainvoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+
+            self.assertEqual(
+                paused_result["route"],
+                "agent",
+            )
+            self.assertEqual(
+                paused_result["status"],
+                "paused",
+            )
+            self.assertFalse(
+                paused_result["is_complete"],
+            )
+            self.assertIn(
+                "__interrupt__",
+                paused_result,
+            )
+            self.assertEqual(
+                paused_result["pending_tool_calls"][0]["tool_name"],
+                "python_executor",
+            )
+            self.assertEqual(
+                paused_result["tool_results"],
+                [],
+            )
+            self.assertEqual(
+                model.calls,
+                1,
+            )
+
+            resumed_result = await runtime.aresume(
+                {
+                    "approved": True,
+                },
+                thread_id=thread_id,
+            )
+
+        self.assertEqual(
+            resumed_result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            resumed_result["is_complete"],
+        )
+        self.assertEqual(
+            resumed_result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            resumed_result["tool_results"][0]["result"]["output"].strip(),
+            "5",
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
+
 
     async def test_aresume_forwards_command_and_config(self):
         runtime = AgentRuntime(
