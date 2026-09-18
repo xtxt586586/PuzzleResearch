@@ -1416,6 +1416,109 @@ class AgentToolNodeTests(unittest.TestCase):
         )
 
 
+    def test_scalar_tool_result_is_normalized(self):
+        def multiply(value: int) -> int:
+            return value * 2
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="multiply",
+                    description="计算两倍数值",
+                    handler=multiply,
+                ),
+            ]
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "multiply",
+                        "arguments": {
+                            "value": 21,
+                        },
+                    },
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                },
+            },
+        )
+
+        self.assertEqual(
+            result["status"],
+            "running",
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            42,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["error"],
+            "",
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_completed",
+        )
+
+
+    def test_error_tool_result_sets_failed_status(self):
+        def failing_tool() -> dict[str, str]:
+            return {
+                "output": "",
+                "error": "工具内部测试错误",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="failing_tool",
+                    description="返回测试错误",
+                    handler=failing_tool,
+                ),
+            ]
+        )
+
+        result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "failing_tool",
+                        "arguments": {},
+                    },
+                ],
+                "tool_approved": True,
+            },
+            config={
+                "configurable": {
+                    "tool_registry": registry,
+                },
+            },
+        )
+
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "工具内部测试错误",
+            result["errors"],
+        )
+        self.assertIn(
+            "工具内部测试错误",
+            result["final_report"],
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_failed",
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()
