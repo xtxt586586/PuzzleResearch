@@ -221,5 +221,74 @@ class ToolRegistryTests(unittest.TestCase):
         )
 
 
+    def test_argument_schema_ignores_variadic_parameters(self):
+        def variadic(
+                required: str,
+                *values,
+                **options,
+        ) -> str:
+            return required
+
+        tool = ToolDefinition(
+            name="variadic",
+            description="可变参数工具",
+            handler=variadic,
+        )
+
+        self.assertEqual(
+            tool.argument_schema(),
+            [
+                {
+                    "name": "required",
+                    "required": True,
+                    "annotation": "str",
+                },
+            ],
+        )
+
+    def test_argument_schema_preserves_missing_annotation(self):
+        def unannotated(value):
+            return value
+
+        tool = ToolDefinition(
+            name="unannotated",
+            description="无类型标注工具",
+            handler=unannotated,
+        )
+
+        self.assertEqual(
+            tool.argument_schema(),
+            [
+                {
+                    "name": "value",
+                    "required": True,
+                    "annotation": None,
+                },
+            ],
+        )
+
+    def test_argument_schema_preserves_none_default(self):
+        def optional(value: str | None = None):
+            return value
+
+        tool = ToolDefinition(
+            name="optional",
+            description="可选参数工具",
+            handler=optional,
+        )
+
+        self.assertEqual(
+            tool.argument_schema(),
+            [
+                {
+                    "name": "value",
+                    "required": False,
+                    "annotation": "str | None",
+                    "default": None,
+                },
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
