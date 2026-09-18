@@ -1177,5 +1177,163 @@ class AgentToolNodeTests(unittest.TestCase):
         )
 
 
+    def test_agent_plan_and_execution_share_optional_argument_contract(self):
+        def format_text(
+                text: str,
+                prefix: str = ">>",
+        ) -> dict[str, str]:
+            return {
+                "output": f"{prefix}{text}",
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="format_text",
+                    description="为文本添加前缀",
+                    handler=format_text,
+                ),
+            ]
+        )
+
+        model = FakePlanningModel(
+            '{"tool_name": "format_text", '
+            '"arguments": {"text": "hello"}}'
+        )
+
+        tool_config = {
+            "configurable": {
+                "tool_registry": registry,
+            }
+        }
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            plan_result = agent_plan_node(
+                {
+                    "input": "请给 hello 添加前缀",
+                },
+                config=tool_config,
+            )
+
+        self.assertEqual(
+            plan_result["status"],
+            "running",
+        )
+        self.assertEqual(
+            plan_result["pending_tool_calls"][0]["arguments"],
+            {
+                "text": "hello",
+            },
+        )
+
+        execution_result = agent_tool_node(
+            {
+                "pending_tool_calls": plan_result["pending_tool_calls"],
+                "tool_approved": True,
+            },
+            config=tool_config,
+        )
+
+        self.assertEqual(
+            execution_result["status"],
+            "running",
+        )
+        self.assertEqual(
+            execution_result["tool_results"][0]["result"]["output"],
+            ">>hello",
+        )
+
+
+    def test_agent_plan_and_execution_reject_same_invalid_arguments(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo_text(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo_text",
+                    description="返回输入文本",
+                    handler=echo_text,
+                ),
+            ]
+        )
+
+        invalid_arguments = {
+            "text": "hello",
+            "unexpected": True,
+        }
+
+        model = FakePlanningModel(
+            '{"tool_name": "echo_text", '
+            '"arguments": {"text": "hello", "unexpected": true}}'
+        )
+
+        tool_config = {
+            "configurable": {
+                "tool_registry": registry,
+            }
+        }
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            plan_result = agent_plan_node(
+                {
+                    "input": "请返回 hello",
+                },
+                config=tool_config,
+            )
+
+        self.assertEqual(
+            plan_result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "参数无效",
+            plan_result["final_report"],
+        )
+
+        execution_result = agent_tool_node(
+            {
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "echo_text",
+                        "arguments": invalid_arguments,
+                    },
+                ],
+                "tool_approved": True,
+            },
+            config=tool_config,
+        )
+
+        self.assertEqual(
+            execution_result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "参数无效",
+            execution_result["final_report"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            0,
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
