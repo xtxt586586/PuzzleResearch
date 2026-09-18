@@ -115,6 +115,40 @@ class RetryToolPlanningModel:
         )()
 
 
+class LongOutputPlanningModel:
+    def __init__(self):
+        self.responses = [
+            (
+                '{"action": "tool", '
+                '"tool_name": "large_output", '
+                '"arguments": {}'
+                "}"
+            ),
+            (
+                '{"action": "finish", '
+                '"final_report": "长文本处理完成。"}'
+            ),
+        ]
+        self.calls = 0
+
+    def invoke(self, messages, config=None):
+        content = self.responses[
+            min(
+                self.calls,
+                len(self.responses) - 1,
+            )
+        ]
+        self.calls += 1
+
+        return type(
+            "FakeResponse",
+            (),
+            {
+                "content": content,
+            },
+        )()
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def test_invoke_injects_profile_registry_and_thread(self):
         profile = AgentProfile(
@@ -445,6 +479,81 @@ class AgentRuntimeTests(unittest.TestCase):
                 "tool_retry",
                 "tool_completed",
             ],
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
+    def test_invoke_limits_custom_tool_result_length(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def large_output() -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": "abcdefghijklmnopqrstuvwxyz",
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="large_output",
+                    description="返回较长文本",
+                    handler=large_output,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="limited-runtime-result-profile",
+                enabled_tools=frozenset({"large_output"}),
+                max_tool_result_chars=16,
+            ),
+            registry=registry,
+        )
+        model = LongOutputPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 large_output 返回长文本",
+            )
+
+        output = result["tool_results"][0]["result"]["output"]
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            1,
+        )
+        self.assertLessEqual(
+            len(output),
+            16,
+        )
+        self.assertIn(
+            "工具结果已截断",
+            output,
+        )
+        self.assertTrue(
+            result["tool_results"][0]["result"]["result_truncated"],
         )
         self.assertEqual(
             model.calls,
@@ -1514,6 +1623,81 @@ class AgentRuntimeAsyncTests(
                 "tool_retry",
                 "tool_completed",
             ],
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
+    async def test_ainvoke_limits_custom_tool_result_length(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def large_output() -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": "abcdefghijklmnopqrstuvwxyz",
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="large_output",
+                    description="返回较长文本",
+                    handler=large_output,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="async-limited-runtime-result-profile",
+                enabled_tools=frozenset({"large_output"}),
+                max_tool_result_chars=16,
+            ),
+            registry=registry,
+        )
+        model = LongOutputPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = await runtime.ainvoke(
+                "请调用工具 large_output 返回长文本",
+            )
+
+        output = result["tool_results"][0]["result"]["output"]
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            1,
+        )
+        self.assertLessEqual(
+            len(output),
+            16,
+        )
+        self.assertIn(
+            "工具结果已截断",
+            output,
+        )
+        self.assertTrue(
+            result["tool_results"][0]["result"]["result_truncated"],
         )
         self.assertEqual(
             model.calls,
