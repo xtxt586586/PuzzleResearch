@@ -664,5 +664,186 @@ class AgentRuntimeAsyncTests(
         )
 
 
+
+    def test_cancel_persists_cancelled_state(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        cancelled_snapshot = {
+            "values": {
+                "status": "cancelled",
+                "is_cancelled": True,
+                "cancel_token_id": "cancel-001",
+                "pending_tool_calls": [],
+            },
+        }
+
+        with patch.object(
+            runtime.graph,
+            "update_state",
+            return_value={},
+        ) as graph_update_state, patch.object(
+            runtime.graph,
+            "get_state",
+            return_value=cancelled_snapshot,
+        ) as graph_get_state:
+            result = runtime.cancel(
+                thread_id="cancel-thread-001",
+                cancel_token_id="cancel-001",
+            )
+
+        self.assertEqual(
+            result,
+            cancelled_snapshot,
+        )
+
+        runtime_config = graph_update_state.call_args.args[0]
+        update_values = graph_update_state.call_args.args[1]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "cancel-thread-001",
+        )
+        self.assertEqual(
+            update_values["is_cancelled"],
+            True,
+        )
+        self.assertEqual(
+            update_values["status"],
+            "cancelled",
+        )
+        self.assertEqual(
+            update_values["cancel_token_id"],
+            "cancel-001",
+        )
+        self.assertEqual(
+            update_values["pending_tool_calls"],
+            [],
+        )
+        graph_get_state.assert_called_once()
+
+
+    def test_cancel_generates_token_when_missing(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        with patch.object(
+            runtime.graph,
+            "update_state",
+            return_value={},
+        ) as graph_update_state, patch.object(
+            runtime.graph,
+            "get_state",
+            return_value={
+                "values": {
+                    "status": "cancelled",
+                },
+            },
+        ):
+            runtime.cancel(
+                thread_id="cancel-thread-002",
+            )
+
+        update_values = graph_update_state.call_args.args[1]
+        generated_token = update_values["cancel_token_id"]
+
+        self.assertIsInstance(
+            generated_token,
+            str,
+        )
+        self.assertTrue(
+            generated_token,
+        )
+
+
+    def test_cancel_requires_checkpointer(self):
+        runtime = AgentRuntime()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "checkpointer",
+        ):
+            runtime.cancel(
+                thread_id="cancel-thread-003",
+            )
+
+
+    def test_cancel_rejects_blank_token(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "cancel_token_id",
+        ):
+            runtime.cancel(
+                thread_id="cancel-thread-004",
+                cancel_token_id="   ",
+            )
+
+
+    async def test_acancel_persists_cancelled_state(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        cancelled_snapshot = {
+            "values": {
+                "status": "cancelled",
+                "is_cancelled": True,
+                "cancel_token_id": "async-cancel-001",
+                "pending_tool_calls": [],
+            },
+        }
+
+        with patch.object(
+            runtime.graph,
+            "aupdate_state",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as graph_aupdate_state, patch.object(
+            runtime.graph,
+            "aget_state",
+            new_callable=AsyncMock,
+            return_value=cancelled_snapshot,
+        ) as graph_aget_state:
+            result = await runtime.acancel(
+                thread_id="async-cancel-thread-001",
+                cancel_token_id="async-cancel-001",
+            )
+
+        self.assertEqual(
+            result,
+            cancelled_snapshot,
+        )
+
+        runtime_config = graph_aupdate_state.call_args.args[0]
+        update_values = graph_aupdate_state.call_args.args[1]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-cancel-thread-001",
+        )
+        self.assertTrue(
+            update_values["is_cancelled"],
+        )
+        self.assertEqual(
+            update_values["status"],
+            "cancelled",
+        )
+        self.assertEqual(
+            update_values["cancel_token_id"],
+            "async-cancel-001",
+        )
+        self.assertEqual(
+            update_values["pending_tool_calls"],
+            [],
+        )
+        graph_aget_state.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

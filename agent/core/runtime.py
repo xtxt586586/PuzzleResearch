@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+
+import uuid
 from typing import Any,Mapping
 
 from langgraph.types import Command
@@ -51,6 +53,24 @@ class AgentRuntime:
         self.graph = create_research_graph(
             checkpointer=checkpointer,
         )
+
+
+    @staticmethod
+    def _resolve_cancel_token(cancel_token_id: str | None) -> str:
+        if cancel_token_id is not None:
+            normalized_token = cancel_token_id.strip()
+
+            if not normalized_token:
+                raise ValueError(
+                    "cancel_token_id 不能为空"
+                )
+
+            return normalized_token
+
+        return uuid.uuid4().hex
+
+
+
 
 
     def _require_checkpointer(
@@ -201,6 +221,40 @@ class AgentRuntime:
         )
 
 
+    def cancel(
+            self,
+            *,
+            thread_id: str,
+            cancel_token_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """
+        持久化取消请求，并返回取消后的状态快照。
+        """
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        resolved_token = self._resolve_cancel_token(cancel_token_id)
+
+        self.graph.update_state(
+            runtime_config,
+            {
+                "is_cancelled": True,
+                "status": "cancelled",
+                "cancel_token_id": resolved_token,
+                "pending_tool_calls": [],
+            },
+        )
+
+        return self.graph.get_state(
+            runtime_config,
+        )
+
+
+
     def resume(
             self,
             resume_value: Any,
@@ -223,6 +277,44 @@ class AgentRuntime:
             Command(resume=resume_value),
             config=runtime_config,
         )
+
+
+
+    async def acancel(
+            self,
+            *,
+            thread_id: str,
+            cancel_token_id: str | None = None,
+            config: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """
+        异步持久化取消请求，并返回取消后的状态快照。
+        """
+
+        self._require_checkpointer("acancel")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        resolved_token = self._resolve_cancel_token(cancel_token_id)
+
+        self.graph.aupdate_state(
+            runtime_config,
+            {
+                "is_cancelled": True,
+                "status": "cancelled",
+                "cancel_token_id": resolved_token,
+                "pending_tool_calls": [],
+            },
+        )
+
+        return await self.graph.aget_state(
+            runtime_config,
+        )
+
+
 
     async def aresume(
             self,
