@@ -84,6 +84,27 @@ class AgentRuntime:
 
 
 
+    @staticmethod
+    def _normalize_thread_id(
+            thread_id: str,
+    ) -> str:
+
+        if not isinstance(thread_id,str):
+            raise TypeError(
+                "thread_id 必须是字符串。"
+            )
+
+        normalized_thread_id = thread_id.strip()
+
+        if not normalized_thread_id:
+            raise ValueError(
+                "thread_id 不能为空"
+            )
+
+        return normalized_thread_id
+
+
+
     def _build_config(
             self,
             *,
@@ -97,16 +118,18 @@ class AgentRuntime:
         )
 
         if thread_id is not None:
-            normalized_thread_id = thread_id.strip()
-
-            if not normalized_thread_id:
-                raise ValueError(
-                    "thread_id 不能为空"
-                )
-
             configurable["thread_id"] = (
-                normalized_thread_id
+                self._normalize_thread_id(thread_id)
             )
+
+        elif configurable.get("thread_id") is not None:
+            configurable["thread_id"] = (
+                self._normalize_thread_id(
+                    configurable["thread_id"]
+                )
+            )
+
+
 
         if (
             self._checkpointer is not None
@@ -131,6 +154,40 @@ class AgentRuntime:
         runtime_config["configurable"] = configurable
 
         return runtime_config
+
+
+    @staticmethod
+    def _snapshot_values(
+            snapshot: Any,
+    ) -> dict[str,Any]:
+        if isinstance(snapshot,Mapping):
+            values = snapshot.get("values") or {}
+
+        else:
+            values = getattr(
+                snapshot,
+                "values",
+                {},
+            ) or {}
+
+        return dict(values)
+
+    @staticmethod
+    def _snap_interrupts(
+            snapshot: Any,
+    ) -> list[Any]:
+        if isinstance(snapshot,Mapping):
+            interrupts = snapshot.get("interrupts") or []
+
+        else:
+            interrupts = getattr(
+                snapshot,
+                "interrupts",
+                [],
+            ) or []
+
+        return list(interrupts)
+
 
 
     def _build_payload(
@@ -364,6 +421,55 @@ class AgentRuntime:
         )
 
 
+    def inspect_thread(
+            self,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+    ) -> dict[str,Any]:
+        """
+        返回适合 API 或控制台展示的线程状态摘要。
+        """
+
+        normalized_thread_id = (
+            self._normalize_thread_id(thread_id)
+        )
+
+        snapshot = self.get_state(
+            thread_id=normalized_thread_id,
+            config=config,
+        )
+
+        values = self._snapshot_values(snapshot)
+        interrupts = self._snap_interrupts(snapshot)
+
+        return {
+            "thread_id": normalized_thread_id,
+            "status": values.get(
+                "status",
+                "pending",
+            ),
+            "is_complete": bool(
+                values.get("is_complete",False)
+            ),
+            "is_cancelled": bool(
+                values.get("is_cancelled",False)
+            ),
+            "cancel_token_id": values.get(
+                "cancel_token_id"
+            ),
+            "pending_tool_count": len(
+                values.get("pending_tool_calls",[])
+            ),
+            "tool_call_count": int(
+                values.get("tool_call_count",0)
+            ),
+            "interrupt_count": len(interrupts),
+            "snapshot": snapshot,
+        }
+
+
+
 
     async def aget_state(
             self,
@@ -388,6 +494,53 @@ class AgentRuntime:
             subgraphs=subgraphs,
         )
 
+
+    async def ainspect_thread(
+            self,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+    ) -> dict[str,Any]:
+        """
+        异步返回线程状态摘要。
+        """
+
+        normalized_thread_id = (
+            self._normalize_thread_id(thread_id)
+        )
+
+        snapshot = await self.aget_state(
+            thread_id=normalized_thread_id,
+            config=config,
+        )
+
+        values = self._snapshot_values(snapshot)
+        interrupts = self._snap_interrupts(snapshot)
+
+        return {
+            "thread_id": normalized_thread_id,
+            "status": values.get(
+                "status",
+                "pending",
+            ),
+            "is_complete": bool(
+                values.get("is_complete",False)
+            ),
+            "is_cancelled": bool(
+                values.get("is_cancelled",False)
+            ),
+            "cancel_token_id": values.get(
+                "cancel_token_id"
+            ),
+            "pending_tool_count": len(
+                values.get("pending_tool_calls",[])
+            ),
+            "tool_call_count": int(
+                values.get("tool_call_count",0)
+            ),
+            "interrupt_count": len(interrupts),
+            "snapshot": snapshot,
+        }
 
     def get_state_history(
             self,

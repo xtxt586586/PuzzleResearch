@@ -845,5 +845,164 @@ class AgentRuntimeAsyncTests(
         graph_aget_state.assert_awaited_once()
 
 
+    def test_thread_id_is_normalized(self):
+        runtime = AgentRuntime()
+
+        with patch.object(
+            runtime.graph,
+            "invoke",
+            return_value={
+                "status": "completed",
+            },
+        ) as graph_invoke:
+            runtime.invoke(
+                "测试线程 ID",
+                thread_id="  thread-normalized  ",
+            )
+
+        runtime_config = (
+            graph_invoke.call_args.kwargs["config"]
+        )
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "thread-normalized",
+        )
+
+
+    def test_thread_id_rejects_non_string(self):
+        runtime = AgentRuntime()
+
+        with self.assertRaises(TypeError):
+            runtime.invoke(
+                "测试请求",
+                thread_id=123,
+            )
+
+
+    def test_inspect_thread_returns_summary(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        snapshot = {
+            "values": {
+                "status": "paused",
+                "is_complete": False,
+                "is_cancelled": False,
+                "cancel_token_id": None,
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "python_executor",
+                    },
+                ],
+                "tool_call_count": 2,
+            },
+            "interrupts": [
+                {
+                    "value": {
+                        "type": "tool_approval",
+                    },
+                },
+            ],
+        }
+
+        with patch.object(
+            runtime.graph,
+            "get_state",
+            return_value=snapshot,
+        ):
+            result = runtime.inspect_thread(
+                thread_id="  inspect-thread-001  ",
+            )
+
+        self.assertEqual(
+            result["thread_id"],
+            "inspect-thread-001",
+        )
+        self.assertEqual(
+            result["status"],
+            "paused",
+        )
+        self.assertFalse(
+            result["is_complete"],
+        )
+        self.assertFalse(
+            result["is_cancelled"],
+        )
+        self.assertEqual(
+            result["pending_tool_count"],
+            1,
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            2,
+        )
+        self.assertEqual(
+            result["interrupt_count"],
+            1,
+        )
+        self.assertIs(
+            result["snapshot"],
+            snapshot,
+        )
+
+
+    async def test_ainspect_thread_returns_summary(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        snapshot = {
+            "values": {
+                "status": "cancelled",
+                "is_complete": False,
+                "is_cancelled": True,
+                "cancel_token_id": "async-cancel-001",
+                "pending_tool_calls": [],
+                "tool_call_count": 3,
+            },
+            "interrupts": [],
+        }
+
+        with patch.object(
+            runtime.graph,
+            "aget_state",
+            new_callable=AsyncMock,
+            return_value=snapshot,
+        ):
+            result = await runtime.ainspect_thread(
+                thread_id="async-inspect-thread-001",
+            )
+
+        self.assertEqual(
+            result["thread_id"],
+            "async-inspect-thread-001",
+        )
+        self.assertEqual(
+            result["status"],
+            "cancelled",
+        )
+        self.assertTrue(
+            result["is_cancelled"],
+        )
+        self.assertEqual(
+            result["cancel_token_id"],
+            "async-cancel-001",
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            3,
+        )
+        self.assertEqual(
+            result["pending_tool_count"],
+            0,
+        )
+        self.assertEqual(
+            result["interrupt_count"],
+            0,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
