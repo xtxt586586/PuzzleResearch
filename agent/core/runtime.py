@@ -14,6 +14,42 @@ from agent.core.events import RuntimeEvent
 from tools.builtin import create_default_registry
 
 
+
+def _normalize_event_types(
+        event_types: Iterable[str] | str | None,
+) -> set[str] | None:
+    """
+    标准化事件类型过滤条件。
+
+    字符串视为单个事件类型，
+    其他可迭代对象转换为字符串集合。
+    """
+
+    if event_types is None:
+        return None
+
+    if isinstance(event_types,str):
+        normalized = event_types.strip()
+
+        return (
+            {normalized}
+            if normalized
+            else set()
+        )
+
+    try:
+        values = iter(event_types)
+    except TypeError as exc:
+        raise TypeError(
+            "event_types 必须是字符串或可迭代对象"
+        ) from exc
+
+    return {
+        str(item).strip()
+        for item in values
+        if str(item).strip()
+    }
+
 class AgentRuntime:
     """
     Agent 运行时门面。
@@ -791,17 +827,15 @@ class AgentRuntime:
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
             version: str = "v2",
-            event_types: set[str] | None = None,
+            event_types: Iterable[str] | str | None = None,
             **kwargs: Any,
     ) -> Iterable[RuntimeEvent]:
         """
         同步返回标准化 RuntimeEvent。
         """
 
-        allowed_events = (
-            set(event_types)
-            if event_types is not None
-            else None
+        allowed_events = _normalize_event_types(
+            event_types
         )
 
         for raw_event in self.stream_events(
@@ -830,17 +864,15 @@ class AgentRuntime:
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
             version: str = "v2",
-            event_types: set[str] | None = None,
+            event_types: Iterable[str] | str | None = None,
             **kwargs: Any,
     ) -> AsyncIterable[RuntimeEvent]:
         """
         异步返回标准化 RuntimeEvent。
         """
 
-        allowed_events = (
-            set(event_types)
-            if event_types is not None
-            else None
+        allowed_events = _normalize_event_types(
+            event_types
         )
 
         async for raw_event in self.astream_events(
@@ -868,17 +900,15 @@ class AgentRuntime:
             thread_id: str,
             config: Mapping[str, Any] | None = None,
             version: str = "v2",
-            event_types: set[str] | None = None,
+            event_types: Iterable[str] | str | None = None,
             **kwargs: Any,
     ) -> Iterable[RuntimeEvent]:
         """
         同步恢复线程并返回标准化运行事件。
         """
 
-        allowed_events = (
-            set(event_types)
-            if event_types is not None
-            else None
+        allowed_events = _normalize_event_types(
+            event_types
         )
 
         for raw_event in self.resume_events(
@@ -905,17 +935,15 @@ class AgentRuntime:
             thread_id: str,
             config: Mapping[str, Any] | None = None,
             version: str = "v2",
-            event_types: set[str] | None = None,
+            event_types: Iterable[str] | str | None = None,
             **kwargs: Any,
     ) -> AsyncIterable[RuntimeEvent]:
         """
         异步恢复线程并返回标准化运行事件。
         """
 
-        allowed_events = (
-            set(event_types)
-            if event_types is not None
-            else None
+        allowed_events = _normalize_event_types(
+            event_types
         )
 
         async for raw_event in self.aresume_events(

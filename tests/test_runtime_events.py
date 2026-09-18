@@ -569,6 +569,58 @@ class RuntimeEventStreamTests(unittest.TestCase):
         )
 
 
+    def test_stream_runtime_events_accepts_string_event_type(self):
+        runtime = AgentRuntime()
+
+        raw_events = [
+            {
+                "event": "on_chain_start",
+                "name": "router",
+            },
+            {
+                "event": "on_chain_end",
+                "name": "finalize",
+            },
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "stream_events",
+            return_value=iter(raw_events),
+        ):
+            result = list(
+                runtime.stream_runtime_events(
+                    "字符串事件过滤",
+                    thread_id="event-type-string-001",
+                    event_types="on_chain_end",
+                )
+            )
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+        self.assertEqual(
+            result[0].event,
+            "on_chain_end",
+        )
+
+
+    def test_stream_runtime_events_rejects_invalid_event_types(self):
+        runtime = AgentRuntime()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "event_types",
+        ):
+            list(
+                runtime.stream_runtime_events(
+                    "非法事件过滤",
+                    event_types=123,
+                )
+            )
+
+
 class AsyncRuntimeEventStreamTests(
         unittest.IsolatedAsyncioTestCase,
 ):
@@ -806,6 +858,45 @@ class AsyncRuntimeEventStreamTests(
         self.assertNotIn(
             "event_types",
             forwarded_kwargs,
+        )
+
+
+    async def test_astream_runtime_events_accepts_sequence_event_types(self):
+        runtime = AgentRuntime()
+
+        async def raw_event_stream():
+            yield {
+                "event": "on_chain_start",
+                "name": "router",
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "finalize",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=raw_event_stream(),
+        ):
+            result = [
+                event
+                async for event in runtime.astream_runtime_events(
+                    "序列事件过滤",
+                    thread_id="event-type-sequence-001",
+                    event_types=[
+                        "on_chain_end",
+                    ],
+                )
+            ]
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+        self.assertEqual(
+            result[0].event,
+            "on_chain_end",
         )
 
 
