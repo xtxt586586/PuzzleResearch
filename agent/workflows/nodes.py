@@ -1689,14 +1689,14 @@ def agent_plan_node(
         for blocked_tool_name in profile.blocked_tools:
             enabled_tools[blocked_tool_name] = False
 
-    tool_descriptions = "\n".join(
-        (
-            f"- {tool.name}"
-            f"({tool.format_argument_contract()}): "
-            f"{tool.description}"
-        )
-        for tool in available_tools
-        if enabled_tools.get(tool.name, False)
+    tool_descriptions = json.dumps(
+        [
+            tool.to_schema()
+            for tool in available_tools
+            if enabled_tools.get(tool.name, True)
+        ],
+        ensure_ascii=False,
+        default=str,
     )
 
 
@@ -1721,7 +1721,8 @@ def agent_plan_node(
                 "如果还需要工具，返回 action=tool。"
                 "如果任务已经完成，返回 action=finish。"
                 "不要选择不在工具列表中的工具。"
-                f"\n当前可用工具：\n{tool_descriptions}\n"
+                f"\n当前可用工具（JSON Schema）：\n"
+                f"{tool_descriptions}\n"
                 "只能返回 JSON，不要输出 Markdown 代码块或解释文字。"
                 "\n\n"
                 "调用工具时的 JSON 格式："

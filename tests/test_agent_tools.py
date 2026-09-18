@@ -1047,7 +1047,15 @@ class AgentToolNodeTests(unittest.TestCase):
         )
         self.assertIsNotNone(model.messages)
         self.assertIn(
-            "echo(text (必填))",
+            '"name": "text"',
+            model.messages[0].content,
+        )
+        self.assertIn(
+            '"required": true',
+            model.messages[0].content,
+        )
+        self.assertIn(
+            '"annotation": "str"',
             model.messages[0].content,
         )
         self.assertIn(
@@ -1108,6 +1116,64 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertEqual(
             result["pending_tool_calls"],
             [],
+        )
+
+    def test_agent_plan_includes_machine_readable_tool_schema(self):
+        def echo_tool(text: str) -> dict[str, str]:
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        model = CapturingPlanningModel(
+            '{"tool_name": "echo", '
+            '"arguments": {"text": "hello"}}'
+        )
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = agent_plan_node(
+                {
+                    "input": "请返回 hello",
+                },
+                config={
+                    "configurable": {
+                        "tool_registry": registry,
+                    }
+                },
+            )
+
+        self.assertEqual(
+            result["status"],
+            "running",
+        )
+        self.assertIn(
+            '"name": "text"',
+            model.messages[0].content,
+        )
+        self.assertIn(
+            '"required": true',
+            model.messages[0].content,
+        )
+        self.assertIn(
+            '"annotation": "str"',
+            model.messages[0].content,
+        )
+        self.assertIn(
+            '"description": "返回输入文本"',
+            model.messages[0].content,
         )
 
 
