@@ -859,3 +859,77 @@ class AgentRuntime:
                 continue
 
             yield event
+
+    def resume_runtime_events(
+            self,
+            resume_value: Any,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            event_types: set[str] | None = None,
+            **kwargs: Any,
+    ) -> Iterable[RuntimeEvent]:
+        """
+        同步恢复线程并返回标准化运行事件。
+        """
+
+        allowed_events = (
+            set(event_types)
+            if event_types is not None
+            else None
+        )
+
+        for raw_event in self.resume_events(
+            resume_value,
+            thread_id=thread_id,
+            config=config,
+            version=version,
+            **kwargs,
+        ):
+            event = RuntimeEvent.from_raw(raw_event)
+
+            if (
+                allowed_events is not None
+                and event.event not in allowed_events
+            ):
+                continue
+
+            yield event
+
+    async def aresume_runtime_events(
+            self,
+            resume_value: Any,
+            *,
+            thread_id: str,
+            config: Mapping[str, Any] | None = None,
+            version: str = "v2",
+            event_types: set[str] | None = None,
+            **kwargs: Any,
+    ) -> AsyncIterable[RuntimeEvent]:
+        """
+        异步恢复线程并返回标准化运行事件。
+        """
+
+        allowed_events = (
+            set(event_types)
+            if event_types is not None
+            else None
+        )
+
+        async for raw_event in self.aresume_events(
+            resume_value,
+            thread_id=thread_id,
+            config=config,
+            version=version,
+            **kwargs,
+        ):
+            event = RuntimeEvent.from_raw(raw_event)
+
+            if (
+                allowed_events is not None
+                and event.event not in allowed_events
+            ):
+                continue
+
+            yield event

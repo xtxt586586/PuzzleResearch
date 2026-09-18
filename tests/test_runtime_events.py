@@ -191,6 +191,101 @@ class AsyncRuntimeEventStreamTests(
             "on_chain_end",
         )
 
+    def test_resume_runtime_events_normalizes_and_filters(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        raw_events = [
+            {
+                "event": "on_chain_start",
+                "name": "agent_tool",
+            },
+            {
+                "event": "on_chain_end",
+                "name": "finalize",
+            },
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "stream_events",
+            return_value=iter(raw_events),
+        ):
+            result = list(
+                runtime.resume_runtime_events(
+                    {"approved": True},
+                    thread_id="resume-events-001",
+                    event_types={
+                        "on_chain_end",
+                    },
+                )
+            )
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+        self.assertIsInstance(
+            result[0],
+            RuntimeEvent,
+        )
+        self.assertEqual(
+            result[0].event,
+            "on_chain_end",
+        )
+        self.assertEqual(
+            result[0].name,
+            "finalize",
+        )
+
+    async def test_aresume_runtime_events_normalizes(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        async def raw_event_stream():
+            yield {
+                "event": "on_chain_start",
+                "name": "agent_tool",
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "finalize",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=raw_event_stream(),
+        ):
+            result = [
+                event
+                async for event in runtime.aresume_runtime_events(
+                    {"approved": True},
+                    thread_id="resume-events-002",
+                )
+            ]
+
+        self.assertEqual(
+            len(result),
+            2,
+        )
+        self.assertTrue(
+            all(
+                isinstance(event, RuntimeEvent)
+                for event in result
+            )
+        )
+        self.assertEqual(
+            result[-1].event,
+            "on_chain_end",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
