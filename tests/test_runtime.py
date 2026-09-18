@@ -680,6 +680,76 @@ class AgentRuntimeTests(unittest.TestCase):
         )
 
 
+    def test_invoke_enforces_profile_tool_call_limit(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-limit-profile",
+                enabled_tools=frozenset({"echo"}),
+                tool_call_limit=1,
+            ),
+            registry=registry,
+        )
+        model = RepeatedToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 echo 返回 hello",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            len(result["tool_results"]),
+            1,
+        )
+        self.assertEqual(
+            attempts["count"],
+            1,
+        )
+        self.assertEqual(
+            model.calls,
+            1,
+        )
+
+
     def test_invoke_pauses_and_resume_completes_tool_approval(self):
         model = ApprovalPlanningModel()
 
@@ -1903,6 +1973,76 @@ class AgentRuntimeAsyncTests(
         self.assertEqual(
             model.calls,
             3,
+        )
+
+
+    async def test_ainvoke_enforces_profile_tool_call_limit(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="async-runtime-limit-profile",
+                enabled_tools=frozenset({"echo"}),
+                tool_call_limit=1,
+            ),
+            registry=registry,
+        )
+        model = RepeatedToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = await runtime.ainvoke(
+                "请调用工具 echo 返回 hello",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            len(result["tool_results"]),
+            1,
+        )
+        self.assertEqual(
+            attempts["count"],
+            1,
+        )
+        self.assertEqual(
+            model.calls,
+            1,
         )
 
 
