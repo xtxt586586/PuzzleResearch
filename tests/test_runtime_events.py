@@ -5,6 +5,37 @@ from agent.core.events import RuntimeEvent
 from agent.core.runtime import AgentRuntime
 
 
+class SequentialPlanningModel:
+    def __init__(self):
+        self.responses = [
+            (
+                '{"action": "tool", '
+                '"tool_name": "python_executor", '
+                '"arguments": {'
+                '"code": "print(2 + 3)"'
+                "}}"
+            ),
+            (
+                '{"action": "finish", '
+                '"final_report": "计算完成，结果是 5。"}'
+            ),
+        ]
+        self.calls = 0
+
+    def invoke(self, messages, config=None):
+        response = type(
+            "FakeResponse",
+            (),
+            {
+                "content": self.responses[self.calls],
+            },
+        )()
+
+        self.calls += 1
+        return response
+
+
+
 class RuntimeEventTests(unittest.TestCase):
     def test_from_raw_preserves_event_fields(self):
         event = RuntimeEvent.from_raw(
@@ -234,6 +265,75 @@ class RuntimeEventStreamTests(unittest.TestCase):
             result[0].tool_events[0]["tool_name"],
             "echo",
         )
+
+
+    def test_stream_runtime_events_completes_agent_tool_chain(self):
+        runtime = AgentRuntime()
+        model = SequentialPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = list(
+                runtime.stream_runtime_events(
+                    "请执行 Python 代码计算 2 加 3，然后告诉我结果",
+                    thread_id="runtime-e2e-sync-001",
+                    event_types="on_chain_end",
+                )
+            )
+
+        self.assertTrue(
+            result,
+        )
+        self.assertTrue(
+            all(
+                isinstance(event, RuntimeEvent)
+                for event in result
+            ),
+        )
+        self.assertTrue(
+            all(
+                event.event == "on_chain_end"
+                for event in result
+            ),
+        )
+
+        agent_tool_events = [
+            event
+            for event in result
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+
+        tool_events = agent_tool_events[0].tool_events
+
+        self.assertTrue(
+            tool_events,
+        )
+        self.assertEqual(
+            tool_events[-1]["event_type"],
+            "tool_completed",
+        )
+        self.assertEqual(
+            tool_events[-1]["tool_name"],
+            "python_executor",
+        )
+        self.assertEqual(
+            tool_events[-1]["call_count"],
+            1,
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
+
 
     def test_resume_runtime_events_normalizes_and_filters(self):
         from langgraph.checkpoint.memory import InMemorySaver
@@ -755,6 +855,78 @@ class AsyncRuntimeEventStreamTests(
             result[0].tool_events[0]["error"],
             "测试错误",
         )
+
+
+
+    async def test_astream_runtime_events_completes_agent_tool_chain(self):
+        runtime = AgentRuntime()
+        model = SequentialPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = [
+                event
+                async for event in runtime.astream_runtime_events(
+                    "请执行 Python 代码计算 2 加 3，然后告诉我结果",
+                    thread_id="runtime-e2e-async-001",
+                    event_types={
+                        "on_chain_end",
+                    },
+                )
+            ]
+
+        self.assertTrue(
+            result,
+        )
+        self.assertTrue(
+            all(
+                isinstance(event, RuntimeEvent)
+                for event in result
+            ),
+        )
+        self.assertTrue(
+            all(
+                event.event == "on_chain_end"
+                for event in result
+            ),
+        )
+
+        agent_tool_events = [
+            event
+            for event in result
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+
+        tool_events = agent_tool_events[0].tool_events
+
+        self.assertTrue(
+            tool_events,
+        )
+        self.assertEqual(
+            tool_events[-1]["event_type"],
+            "tool_completed",
+        )
+        self.assertEqual(
+            tool_events[-1]["tool_name"],
+            "python_executor",
+        )
+        self.assertEqual(
+            tool_events[-1]["call_count"],
+            1,
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
 
 
     async def test_astream_runtime_events_forwards_graph_filters(self):

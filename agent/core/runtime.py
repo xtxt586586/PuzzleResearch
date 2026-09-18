@@ -50,6 +50,94 @@ def _normalize_event_types(
         if str(item).strip()
     }
 
+
+def _debug_event_to_raw_event(
+        raw_event: Any,
+) -> dict[str,Any]:
+    """
+    将 LangGraph debug 流事件转换为 RuntimeEvent 使用的原始结构。
+    """
+
+    if not isinstance(raw_event,Mapping):
+        return {
+            "event": "unknown",
+            "data": raw_event,
+        }
+
+    raw_type = str(
+        raw_event.get(
+            "type",
+            "",
+        )
+    ).strip()
+
+    payload = raw_event.get("payload")
+
+    if not isinstance(payload,Mapping):
+        payload = {}
+
+    name = str(
+        payload.get(
+            "name",
+            "",
+        )
+    ).strip()
+
+    raw_run_id = payload.get("id")
+
+    raw_result: dict[str,Any] = {
+        "event": "unknown",
+        "name": name,
+        "data": {},
+    }
+
+    if raw_run_id is not None:
+        raw_result["run_id"] = str(raw_run_id)
+
+    if raw_type == "task":
+        raw_result.update(
+            {
+                "event": "on_chain_start",
+                "data": {
+                    "input": payload.get("input"),
+                },
+            }
+        )
+
+    elif raw_type == "task_result":
+        error = payload.get("error")
+
+        if error is None:
+            raw_result.update(
+                {
+                    "event": "on_chain_end",
+                    "data": {
+                        "output": payload.get("result"),
+                    },
+                }
+            )
+
+        else:
+            raw_result.update(
+                {
+                    "event": "on_chain_error",
+                    "data": {
+                        "output": payload.get("result"),
+                        "error": str(error),
+                    },
+                }
+            )
+
+    else:
+        raw_result["data"] = {
+            "debug": dict[payload],
+        }
+
+    return raw_result
+
+
+
+
 class AgentRuntime:
     """
     Agent 运行时门面。
@@ -691,6 +779,66 @@ class AgentRuntime:
             yield chunk
 
 
+
+    def _stream_sync_events(
+            self,
+            graph_input: Any,
+            runtime_config: Mapping[str,Any],
+            *,
+            version: str,
+            **kwargs: Any,
+    ):
+        """
+        兼容当前 LangGraph 的同步事件流。
+
+        v1/v2 在同步 stream_events 中不可用时，
+        使用 debug stream 并转换为旧版事件结构。
+        """
+
+        try:
+            graph_events = self.graph.stream_events(
+                graph_input,
+                config=runtime_config,
+                version=version,
+                **kwargs,
+            )
+
+            yield from graph_events
+            return
+
+        except NotImplementedError as exc:
+            message = str(exc)
+
+            is_unsupported_sync_version = (
+                version in {
+                    "v1", "v2"
+                }
+                and "Use astream_events()" in message
+            )
+
+            if not is_unsupported_sync_version:
+                raise
+
+        if kwargs:
+            raise NotImplementedError(
+                "当前 LangGraph 同步兼容模式不支持额外事件过滤参数，"
+                "请改用异步事件流。"
+            )
+
+        debug_events = self.graph.stream(
+            graph_input,
+            config=runtime_config,
+            stream_mode="debug",
+        )
+
+        for debug_event in debug_events:
+            yield _debug_event_to_raw_event(
+                debug_event,
+            )
+
+
+
+
     def stream_events(
             self,
             user_input: str,
@@ -718,9 +866,9 @@ class AgentRuntime:
             thread_id=thread_id,
         )
 
-        return self.graph.stream_events(
+        return self._stream_sync_events(
             payload,
-            config=runtime_config,
+            runtime_config,
             version=version,
             **kwargs,
         )
@@ -782,9 +930,9 @@ class AgentRuntime:
             thread_id=thread_id,
         )
 
-        return self.graph.stream_events(
+        return self._stream_sync_events(
             Command(resume=resume_value),
-            config=runtime_config,
+            runtime_config,
             version=version,
             **kwargs,
         )
