@@ -466,6 +466,101 @@ class RuntimeEventStreamTests(unittest.TestCase):
         )
 
 
+    def test_stream_runtime_events_exposes_retry_failure_sequence(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def always_failing_tool() -> dict[str, str]:
+            attempts["count"] += 1
+            raise RuntimeError("事件流重试耗尽")
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="event_failing_tool",
+                    description="始终失败的事件流测试工具",
+                    handler=always_failing_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-retry-event-profile",
+                enabled_tools=frozenset({"event_failing_tool"}),
+                tool_retry_limit=2,
+            ),
+            registry=registry,
+        )
+        model = FailingToolEventPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = list(
+                runtime.stream_runtime_events(
+                    "请调用 event_failing_tool",
+                    thread_id="runtime-retry-event-sync-001",
+                    event_types={"on_chain_end"},
+                )
+            )
+
+        agent_tool_events = [
+            event
+            for event in result
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+
+        tool_events = agent_tool_events[0].tool_events
+
+        self.assertEqual(
+            [
+                item["event_type"]
+                for item in tool_events
+            ],
+            [
+                "tool_started",
+                "tool_retry",
+                "tool_retry",
+                "tool_failed",
+            ],
+        )
+        self.assertEqual(
+            attempts["count"],
+            3,
+        )
+        self.assertEqual(
+            tool_events[-1]["error"],
+            "事件流重试耗尽",
+        )
+        self.assertEqual(
+            model.calls,
+            1,
+        )
+
+        finalize_events = [
+            event
+            for event in result
+            if event.name == "finalize"
+        ]
+
+        self.assertTrue(finalize_events)
+        self.assertEqual(
+            finalize_events[-1].data["output"]["status"],
+            "failed",
+        )
+        self.assertFalse(
+            finalize_events[-1].data["output"]["is_complete"],
+        )
+
+
     def test_resume_runtime_events_normalizes_and_filters(self):
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -1243,6 +1338,102 @@ class AsyncRuntimeEventStreamTests(
         self.assertEqual(
             model.calls,
             1,
+        )
+
+
+    async def test_astream_runtime_events_exposes_retry_failure_sequence(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def always_failing_tool() -> dict[str, str]:
+            attempts["count"] += 1
+            raise RuntimeError("异步事件流重试耗尽")
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="event_failing_tool",
+                    description="始终失败的异步事件流测试工具",
+                    handler=always_failing_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-async-retry-event-profile",
+                enabled_tools=frozenset({"event_failing_tool"}),
+                tool_retry_limit=2,
+            ),
+            registry=registry,
+        )
+        model = FailingToolEventPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = [
+                event
+                async for event in runtime.astream_runtime_events(
+                    "请调用 event_failing_tool",
+                    thread_id="runtime-retry-event-async-001",
+                    event_types={"on_chain_end"},
+                )
+            ]
+
+        agent_tool_events = [
+            event
+            for event in result
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+
+        tool_events = agent_tool_events[0].tool_events
+
+        self.assertEqual(
+            [
+                item["event_type"]
+                for item in tool_events
+            ],
+            [
+                "tool_started",
+                "tool_retry",
+                "tool_retry",
+                "tool_failed",
+            ],
+        )
+        self.assertEqual(
+            attempts["count"],
+            3,
+        )
+        self.assertEqual(
+            tool_events[-1]["error"],
+            "异步事件流重试耗尽",
+        )
+        self.assertEqual(
+            model.calls,
+            1,
+        )
+
+        finalize_events = [
+            event
+            for event in result
+            if event.name == "finalize"
+        ]
+
+        self.assertTrue(finalize_events)
+        self.assertEqual(
+            finalize_events[-1].data["output"]["status"],
+            "failed",
+        )
+        self.assertFalse(
+            finalize_events[-1].data["output"]["is_complete"],
         )
 
 
