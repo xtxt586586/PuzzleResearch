@@ -829,6 +829,137 @@ class AgentRuntimeTests(unittest.TestCase):
         )
 
 
+    def test_invoke_propagates_raised_tool_exception(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def exploding_tool() -> dict[str, str]:
+            attempts["count"] += 1
+            raise RuntimeError("工具抛出的测试异常")
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="exploding_tool",
+                    description="抛出异常的测试工具",
+                    handler=exploding_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-exception-profile",
+                enabled_tools=frozenset({"exploding_tool"}),
+                tool_retry_limit=0,
+            ),
+            registry=registry,
+        )
+        model = FailingToolPlanningModel()
+        model.responses = [
+            '{"action": "tool", "tool_name": "exploding_tool", "arguments": {}}',
+        ]
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 exploding_tool",
+            )
+
+        self.assertEqual(result["route"], "agent")
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(attempts["count"], 1)
+        self.assertEqual(model.calls, 1)
+
+        self.assertIn(
+            "工具抛出的测试异常",
+            result["tool_results"][0]["result"]["error"],
+        )
+        self.assertTrue(
+            any(
+                "工具抛出的测试异常" in error
+                for error in result["errors"]
+            )
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_failed",
+        )
+
+
+    def test_invoke_marks_retry_exhaustion_as_failed(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def always_failing_tool() -> dict[str, str]:
+            attempts["count"] += 1
+            raise RuntimeError("重试后仍然失败")
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="always_failing_tool",
+                    description="始终失败的测试工具",
+                    handler=always_failing_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-retry-exhaustion-profile",
+                enabled_tools=frozenset({"always_failing_tool"}),
+                tool_retry_limit=2,
+            ),
+            registry=registry,
+        )
+        model = FailingToolPlanningModel()
+        model.responses = [
+            (
+                '{"action": "tool", '
+                '"tool_name": "always_failing_tool", '
+                '"arguments": {}'
+                "}"
+            ),
+        ]
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 always_failing_tool",
+            )
+
+        self.assertEqual(result["route"], "agent")
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["is_complete"])
+
+        # 初始执行 1 次，加上 2 次重试，共 3 次。
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(model.calls, 1)
+
+        self.assertIn(
+            "重试后仍然失败",
+            result["tool_results"][0]["result"]["error"],
+        )
+        self.assertTrue(
+            any(
+                "重试后仍然失败" in error
+                for error in result["errors"]
+            )
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_failed",
+        )
+
+
     def test_invoke_pauses_and_resume_completes_tool_approval(self):
         model = ApprovalPlanningModel()
 
@@ -2178,6 +2309,68 @@ class AgentRuntimeAsyncTests(
         self.assertIn(
             "工具内部测试错误",
             result["errors"],
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_failed",
+        )
+
+
+    async def test_ainvoke_propagates_raised_tool_exception(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def exploding_tool() -> dict[str, str]:
+            attempts["count"] += 1
+            raise RuntimeError("异步工具抛出的测试异常")
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="exploding_tool",
+                    description="抛出异常的异步测试工具",
+                    handler=exploding_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-async-exception-profile",
+                enabled_tools=frozenset({"exploding_tool"}),
+                tool_retry_limit=0,
+            ),
+            registry=registry,
+        )
+        model = FailingToolPlanningModel()
+        model.responses = [
+            '{"action": "tool", "tool_name": "exploding_tool", "arguments": {}}',
+        ]
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = await runtime.ainvoke(
+                "请调用工具 exploding_tool",
+            )
+
+        self.assertEqual(result["route"], "agent")
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(attempts["count"], 1)
+        self.assertEqual(model.calls, 1)
+
+        self.assertIn(
+            "异步工具抛出的测试异常",
+            result["tool_results"][0]["result"]["error"],
+        )
+        self.assertTrue(
+            any(
+                "异步工具抛出的测试异常" in error
+                for error in result["errors"]
+            )
         )
         self.assertEqual(
             result["tool_events"][-1]["event_type"],
