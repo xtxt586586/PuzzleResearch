@@ -75,6 +75,47 @@ class RuntimeEvent:
             data=raw_event.get("data")
         )
 
+
+    @property
+    def tool_events(self) -> list[dict[str,Any]]:
+        """
+        返回当前运行事件中携带的工具事件。
+
+        兼容直接放在 data.tool_events，
+        以及 LangGraph 常见的 data.output.tool_events。
+        """
+
+        candidates: list[Any] = [self.data]
+
+        if isinstance(self.data,Mapping):
+            for key in ("output","data"):
+                nested = self.data.get(key)
+
+                if isinstance(nested,Mapping):
+                    candidates.append(nested)
+
+        for candidate in candidates:
+            if not isinstance(candidate,Mapping):
+                continue
+
+            raw_events = candidate.get("tool_events")
+
+            if not isinstance(raw_events,list):
+                continue
+
+            return [
+                dict(item)
+                for item in raw_events
+                if isinstance(
+                    item,
+                    Mapping,
+                )
+            ]
+
+        return []
+
+
+
     def to_dict(self) -> dict[str,Any]:
         return {
             "event": self.event,
