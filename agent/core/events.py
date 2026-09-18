@@ -19,6 +19,43 @@ def _copy_event_value(value: Any) -> Any:
         return value
 
 
+def _normalize_event_items(value: Any) -> list[Any]:
+    """
+    将事件中的集合字段标准化为列表。
+
+    字符串视为单个元素，
+    非可迭代或映射类型视为空列表。
+    """
+
+    if value is None:
+        return []
+
+    if isinstance(value,(str,bytes)):
+        return [value]
+
+    if isinstance(value,Mapping):
+        return []
+
+    try:
+        return list(value)
+    except Exception:
+        return []
+
+
+def _normalize_event_metadata(
+        value: Any
+) -> dict[str,Any]:
+    """
+    将事件 metadata 标准化为字典。
+    """
+
+    if not isinstance(value,Mapping):
+        return {}
+
+    return dict(value)
+
+
+
 @dataclass(frozen=True)
 class RuntimeEvent:
     """
@@ -47,12 +84,12 @@ class RuntimeEvent:
                 data=raw_event,
             )
 
-        raw_parent_ids = raw_event.get(
-            "parent_ids"
-        ) or []
+        raw_parent_ids = _normalize_event_items(
+            raw_event.get("parent_ids")
+        )
 
-        raw_tags = raw_event.get(
-            "tags"
+        raw_tags = _normalize_event_items(
+            raw_event.get("tags")
         )
 
         return cls(
@@ -79,14 +116,11 @@ class RuntimeEvent:
             ),
             tags=tuple(
                 str(item)
-                for item in (
-                    raw_event.get("tags")
-                    or []
-                )
+                for item in raw_tags
             ),
             metadata=_copy_event_value(
-                dict(
-                    raw_event.get("metadata") or {}
+                _normalize_event_metadata(
+                    raw_event.get("metadata")
                 )
             ),
             data=_copy_event_value(

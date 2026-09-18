@@ -499,6 +499,76 @@ class RuntimeEventStreamTests(unittest.TestCase):
         )
 
 
+    def test_from_raw_normalizes_malformed_collections(self):
+        event = RuntimeEvent.from_raw(
+            {
+                "event": "on_chain_end",
+                "parent_ids": "parent-001",
+                "tags": "agent",
+                "metadata": [
+                    "invalid-metadata",
+                ],
+            }
+        )
+
+        self.assertEqual(
+            event.parent_ids,
+            ("parent-001",),
+        )
+        self.assertEqual(
+            event.tags,
+            ("agent",),
+        )
+        self.assertEqual(
+            event.metadata,
+            {},
+        )
+
+    def test_tool_events_skip_non_mapping_items(self):
+        event = RuntimeEvent.from_raw(
+            {
+                "event": "on_chain_end",
+                "data": {
+                    "tool_events": [
+                        None,
+                        "invalid-event",
+                        {
+                            "event_type": "tool_completed",
+                            "tool_name": "echo",
+                        },
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(
+            event.tool_events,
+            [
+                {
+                    "event_type": "tool_completed",
+                    "tool_name": "echo",
+                },
+            ],
+        )
+
+    def test_tool_events_return_empty_for_invalid_container(self):
+        event = RuntimeEvent.from_raw(
+            {
+                "event": "on_chain_end",
+                "data": {
+                    "tool_events": {
+                        "event_type": "tool_completed",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(
+            event.tool_events,
+            [],
+        )
+
+
 class AsyncRuntimeEventStreamTests(
         unittest.IsolatedAsyncioTestCase,
 ):
