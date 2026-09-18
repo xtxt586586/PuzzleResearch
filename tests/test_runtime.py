@@ -191,6 +191,25 @@ class RepeatedToolPlanningModel:
         )()
 
 
+class FailingToolPlanningModel:
+    def __init__(self):
+        self.responses = [
+            '{"action": "tool", "tool_name": "failing_tool", "arguments": {}}',
+        ]
+        self.calls = 0
+
+    def invoke(self, messages, config=None):
+        self.calls += 1
+
+        return type(
+            "FakeResponse",
+            (),
+            {
+                "content": self.responses[0],
+            },
+        )()
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def test_invoke_injects_profile_registry_and_thread(self):
         profile = AgentProfile(
@@ -747,6 +766,66 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(
             model.calls,
             1,
+        )
+
+
+    def test_invoke_propagates_structured_tool_error(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def failing_tool() -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": "",
+                "error": "工具内部测试错误",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="failing_tool",
+                    description="返回结构化错误",
+                    handler=failing_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-failure-profile",
+                enabled_tools=frozenset({"failing_tool"}),
+            ),
+            registry=registry,
+        )
+        model = FailingToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 failing_tool",
+            )
+
+        self.assertEqual(result["route"], "agent")
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(attempts["count"], 1)
+        self.assertEqual(model.calls, 1)
+
+        self.assertEqual(
+            result["tool_results"][0]["result"]["error"],
+            "工具内部测试错误",
+        )
+        self.assertIn(
+            "工具内部测试错误",
+            result["errors"],
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_failed",
         )
 
 
@@ -2043,6 +2122,66 @@ class AgentRuntimeAsyncTests(
         self.assertEqual(
             model.calls,
             1,
+        )
+
+
+    async def test_ainvoke_propagates_structured_tool_error(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def failing_tool() -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": "",
+                "error": "工具内部测试错误",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="failing_tool",
+                    description="返回结构化错误",
+                    handler=failing_tool,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-failure-profile",
+                enabled_tools=frozenset({"failing_tool"}),
+            ),
+            registry=registry,
+        )
+        model = FailingToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = await runtime.ainvoke(
+                "请调用工具 failing_tool",
+            )
+
+        self.assertEqual(result["route"], "agent")
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(attempts["count"], 1)
+        self.assertEqual(model.calls, 1)
+
+        self.assertEqual(
+            result["tool_results"][0]["result"]["error"],
+            "工具内部测试错误",
+        )
+        self.assertIn(
+            "工具内部测试错误",
+            result["errors"],
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_failed",
         )
 
 
