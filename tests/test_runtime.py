@@ -149,6 +149,48 @@ class LongOutputPlanningModel:
         )()
 
 
+class RepeatedToolPlanningModel:
+    def __init__(self):
+        self.responses = [
+            (
+                '{"action": "tool", '
+                '"tool_name": "echo", '
+                '"arguments": {'
+                '"text": "hello"'
+                "}}"
+            ),
+            (
+                '{"action": "tool", '
+                '"tool_name": "echo", '
+                '"arguments": {'
+                '"text": "hello"'
+                "}}"
+            ),
+            (
+                '{"action": "finish", '
+                '"final_report": "重复调用处理完成。"}'
+            ),
+        ]
+        self.calls = 0
+
+    def invoke(self, messages, config=None):
+        content = self.responses[
+            min(
+                self.calls,
+                len(self.responses) - 1,
+            )
+        ]
+        self.calls += 1
+
+        return type(
+            "FakeResponse",
+            (),
+            {
+                "content": content,
+            },
+        )()
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def test_invoke_injects_profile_registry_and_thread(self):
         profile = AgentProfile(
@@ -554,6 +596,83 @@ class AgentRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(
             result["tool_results"][0]["result"]["result_truncated"],
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
+    def test_invoke_rejects_repeated_custom_tool_call(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-deduplicate-profile",
+                enabled_tools=frozenset({"echo"}),
+                deduplicate_tool_calls=True,
+            ),
+            registry=registry,
+        )
+        model = RepeatedToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 echo 返回 hello",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "failed",
+        )
+        self.assertIn(
+            "重复工具调用",
+            result["final_report"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            1,
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in result["tool_events"]
+            ],
+            [
+                "tool_started",
+                "tool_completed",
+            ],
         )
         self.assertEqual(
             model.calls,
@@ -1702,6 +1821,88 @@ class AgentRuntimeAsyncTests(
         self.assertEqual(
             model.calls,
             2,
+        )
+
+
+    async def test_ainvoke_reuses_cached_custom_tool_result(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def echo(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="async-cache-profile",
+                enabled_tools=frozenset({"echo"}),
+                cache_tool_results=True,
+            ),
+            registry=registry,
+        )
+        model = RepeatedToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = await runtime.ainvoke(
+                "请调用工具 echo 返回 hello",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            1,
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            2,
+        )
+        self.assertEqual(
+            len(result["tool_results"]),
+            2,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "hello",
+        )
+        self.assertEqual(
+            result["tool_results"][1]["result"]["output"],
+            "hello",
+        )
+        self.assertEqual(
+            result["tool_events"][-1]["event_type"],
+            "tool_cache_hit",
+        )
+        self.assertEqual(
+            model.calls,
+            3,
         )
 
 
