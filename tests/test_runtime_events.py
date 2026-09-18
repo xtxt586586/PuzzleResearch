@@ -398,6 +398,107 @@ class RuntimeEventStreamTests(unittest.TestCase):
         )
 
 
+    def test_stream_runtime_events_forwards_graph_filters(self):
+        runtime = AgentRuntime()
+
+        raw_events = [
+            {
+                "event": "on_chain_end",
+                "name": "agent_tool",
+            },
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "stream_events",
+            return_value=iter(raw_events),
+        ) as graph_stream:
+            result = list(
+                runtime.stream_runtime_events(
+                    "测试过滤参数",
+                    thread_id="filter-thread-001",
+                    event_types={
+                        "on_chain_end",
+                    },
+                    include_names=[
+                        "agent_tool",
+                    ],
+                    exclude_types=[
+                        "on_chain_start",
+                    ],
+                )
+            )
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+
+        forwarded_kwargs = graph_stream.call_args.kwargs
+
+        self.assertEqual(
+            forwarded_kwargs["include_names"],
+            ["agent_tool"],
+        )
+        self.assertEqual(
+            forwarded_kwargs["exclude_types"],
+            ["on_chain_start"],
+        )
+        self.assertNotIn(
+            "event_types",
+            forwarded_kwargs,
+        )
+
+
+    def test_resume_runtime_events_forwards_graph_filters(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        raw_events = [
+            {
+                "event": "on_chain_end",
+                "name": "agent_tool",
+            },
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "stream_events",
+            return_value=iter(raw_events),
+        ) as graph_stream:
+            result = list(
+                runtime.resume_runtime_events(
+                    {"approved": True},
+                    thread_id="filter-thread-003",
+                    event_types={
+                        "on_chain_end",
+                    },
+                    include_names=[
+                        "agent_tool",
+                    ],
+                )
+            )
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+
+        forwarded_kwargs = graph_stream.call_args.kwargs
+
+        self.assertEqual(
+            forwarded_kwargs["include_names"],
+            ["agent_tool"],
+        )
+        self.assertNotIn(
+            "event_types",
+            forwarded_kwargs,
+        )
+
+
 class AsyncRuntimeEventStreamTests(
         unittest.IsolatedAsyncioTestCase,
 ):
@@ -531,6 +632,110 @@ class AsyncRuntimeEventStreamTests(
         self.assertEqual(
             result[0].tool_events[0]["error"],
             "测试错误",
+        )
+
+
+    async def test_astream_runtime_events_forwards_graph_filters(self):
+        runtime = AgentRuntime()
+
+        async def raw_event_stream():
+            yield {
+                "event": "on_chain_end",
+                "name": "agent_tool",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=raw_event_stream(),
+        ) as graph_astream_events:
+            result = [
+                event
+                async for event in runtime.astream_runtime_events(
+                    "异步测试过滤参数",
+                    thread_id="filter-thread-002",
+                    event_types={
+                        "on_chain_end",
+                    },
+                    include_names=[
+                        "agent_tool",
+                    ],
+                    exclude_types=[
+                        "on_chain_start",
+                    ],
+                )
+            ]
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+
+        forwarded_kwargs = (
+            graph_astream_events.call_args.kwargs
+        )
+
+        self.assertEqual(
+            forwarded_kwargs["include_names"],
+            ["agent_tool"],
+        )
+        self.assertEqual(
+            forwarded_kwargs["exclude_types"],
+            ["on_chain_start"],
+        )
+        self.assertNotIn(
+            "event_types",
+            forwarded_kwargs,
+        )
+
+    async def test_aresume_runtime_events_forwards_graph_filters(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        async def raw_event_stream():
+            yield {
+                "event": "on_chain_end",
+                "name": "agent_tool",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=raw_event_stream(),
+        ) as graph_astream_events:
+            result = [
+                event
+                async for event in runtime.aresume_runtime_events(
+                    {"approved": True},
+                    thread_id="filter-thread-004",
+                    event_types={
+                        "on_chain_end",
+                    },
+                    include_names=[
+                        "agent_tool",
+                    ],
+                )
+            ]
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+
+        forwarded_kwargs = (
+            graph_astream_events.call_args.kwargs
+        )
+
+        self.assertEqual(
+            forwarded_kwargs["include_names"],
+            ["agent_tool"],
+        )
+        self.assertNotIn(
+            "event_types",
+            forwarded_kwargs,
         )
 
 
