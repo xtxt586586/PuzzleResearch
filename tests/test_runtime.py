@@ -45,6 +45,41 @@ class ApprovalPlanningModel:
         )()
 
 
+class CustomToolPlanningModel:
+    def __init__(self):
+        self.responses = [
+            (
+                '{"action": "tool", '
+                '"tool_name": "echo", '
+                '"arguments": {'
+                '"text": "hello"'
+                "}}"
+            ),
+            (
+                '{"action": "finish", '
+                '"final_report": "echo 执行完成。"}'
+            ),
+        ]
+        self.calls = 0
+
+    def invoke(self, messages, config=None):
+        content = self.responses[
+            min(
+                self.calls,
+                len(self.responses) - 1,
+            )
+        ]
+        self.calls += 1
+
+        return type(
+            "FakeResponse",
+            (),
+            {
+                "content": content,
+            },
+        )()
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def test_invoke_injects_profile_registry_and_thread(self):
         profile = AgentProfile(
@@ -178,6 +213,65 @@ class AgentRuntimeTests(unittest.TestCase):
             "计算完成，结果是 5。",
         )
 
+
+    def test_invoke_executes_custom_registered_tool(self):
+        def echo(text: str) -> str:
+            return text
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="custom-tool-profile",
+                enabled_tools=frozenset({"echo"}),
+            ),
+            registry=registry,
+        )
+        model = CustomToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 echo 返回 hello",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["tool_name"],
+            "echo",
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "hello",
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
 
 
     def test_invoke_pauses_and_resume_completes_tool_approval(self):
@@ -394,8 +488,6 @@ class AgentRuntimeTests(unittest.TestCase):
             history[0].values["status"],
             "cancelled",
         )
-
-
 
 
     def test_checkpointer_requires_thread_id(self):
@@ -1047,6 +1139,66 @@ class AgentRuntimeAsyncTests(
         )
 
 
+    async def test_ainvoke_executes_custom_registered_tool(self):
+        def echo(text: str) -> str:
+            return text
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="async-custom-tool-profile",
+                enabled_tools=frozenset({"echo"}),
+            ),
+            registry=registry,
+        )
+        model = CustomToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = await runtime.ainvoke(
+                "请调用工具 echo 返回 hello",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["tool_name"],
+            "echo",
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "hello",
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
     async def test_ainvoke_pauses_and_aresume_completes_tool_approval(
             self,
     ):
@@ -1266,8 +1418,6 @@ class AgentRuntimeAsyncTests(
             history[0].values["status"],
             "cancelled",
         )
-
-
 
 
     async def test_aresume_forwards_command_and_config(self):
