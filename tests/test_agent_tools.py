@@ -451,6 +451,16 @@ class AgentToolNodeTests(unittest.TestCase):
             ],
             [1, 1, 2, 3],
         )
+        self.assert_tool_event_contract(
+            result,
+            "flaky",
+            [
+                "tool_started",
+                "tool_retry",
+                "tool_retry",
+                "tool_completed",
+            ],
+        )
 
         for event in result["tool_events"][1:]:
             self.assertIn("duration_ms", event)
@@ -587,6 +597,14 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertGreaterEqual(
             result["tool_events"][1]["duration_ms"],
             0,
+        )
+        self.assert_tool_event_contract(
+            result,
+            "echo",
+            [
+                "tool_started",
+                "tool_completed",
+            ],
         )
 
 
@@ -785,6 +803,22 @@ class AgentToolNodeTests(unittest.TestCase):
         self.assertEqual(
             result["tool_events"][0]["duration_ms"],
             0.0,
+        )
+        self.assert_tool_event_contract(
+            result,
+            "echo",
+            [
+                "tool_cache_hit",
+            ],
+        )
+
+        self.assertEqual(
+            result["tool_results"][0]["tool_name"],
+            "echo",
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "hello",
         )
 
 
@@ -1517,6 +1551,53 @@ class AgentToolNodeTests(unittest.TestCase):
             result["tool_events"][-1]["event_type"],
             "tool_failed",
         )
+        self.assert_tool_event_contract(
+            result,
+            "failing_tool",
+            [
+                "tool_started",
+                "tool_failed",
+            ],
+        )
+
+
+    def assert_tool_event_contract(
+            self,
+            result,
+            tool_name,
+            expected_event_types,
+    ):
+        events = result["tool_events"]
+
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in events
+            ],
+            expected_event_types,
+        )
+
+        for event in events:
+            self.assertEqual(
+                event["tool_name"],
+                tool_name,
+            )
+            self.assertIsInstance(
+                event["call_count"],
+                int,
+            )
+            self.assertGreaterEqual(
+                event["call_count"],
+                1,
+            )
+            self.assertIsInstance(
+                event["attempt"],
+                int,
+            )
+            self.assertGreaterEqual(
+                event["attempt"],
+                1,
+            )
 
 
 
