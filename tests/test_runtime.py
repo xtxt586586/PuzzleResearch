@@ -80,6 +80,41 @@ class CustomToolPlanningModel:
         )()
 
 
+class RetryToolPlanningModel:
+    def __init__(self):
+        self.responses = [
+            (
+                '{"action": "tool", '
+                '"tool_name": "flaky", '
+                '"arguments": {'
+                '"text": "success"'
+                "}}"
+            ),
+            (
+                '{"action": "finish", '
+                '"final_report": "重试后执行完成。"}'
+            ),
+        ]
+        self.calls = 0
+
+    def invoke(self, messages, config=None):
+        content = self.responses[
+            min(
+                self.calls,
+                len(self.responses) - 1,
+            )
+        ]
+        self.calls += 1
+
+        return type(
+            "FakeResponse",
+            (),
+            {
+                "content": content,
+            },
+        )()
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def test_invoke_injects_profile_registry_and_thread(self):
         profile = AgentProfile(
@@ -333,6 +368,87 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(
             model.calls,
             1,
+        )
+
+
+    def test_invoke_retries_transient_custom_tool_error(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def flaky(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            if attempts["count"] < 3:
+                raise RuntimeError("temporary failure")
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="flaky",
+                    description="一个会暂时失败的测试工具",
+                    handler=flaky,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="runtime-retry-profile",
+                enabled_tools=frozenset({"flaky"}),
+                tool_retry_limit=2,
+            ),
+            registry=registry,
+        )
+        model = RetryToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请调用工具 flaky 返回 success",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            3,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "success",
+        )
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in result["tool_events"]
+            ],
+            [
+                "tool_started",
+                "tool_retry",
+                "tool_retry",
+                "tool_completed",
+            ],
+        )
+        self.assertEqual(
+            model.calls,
+            2,
         )
 
 
@@ -1321,6 +1437,87 @@ class AgentRuntimeAsyncTests(
         self.assertEqual(
             model.calls,
             1,
+        )
+
+
+    async def test_ainvoke_retries_transient_custom_tool_error(self):
+        attempts = {
+            "count": 0,
+        }
+
+        def flaky(text: str) -> dict[str, str]:
+            attempts["count"] += 1
+
+            if attempts["count"] < 3:
+                raise RuntimeError("temporary failure")
+
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="flaky",
+                    description="一个会暂时失败的测试工具",
+                    handler=flaky,
+                ),
+            ]
+        )
+
+        runtime = AgentRuntime(
+            profile=AgentProfile(
+                name="async-runtime-retry-profile",
+                enabled_tools=frozenset({"flaky"}),
+                tool_retry_limit=2,
+            ),
+            registry=registry,
+        )
+        model = RetryToolPlanningModel()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = await runtime.ainvoke(
+                "请调用工具 flaky 返回 success",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            attempts["count"],
+            3,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"],
+            "success",
+        )
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in result["tool_events"]
+            ],
+            [
+                "tool_started",
+                "tool_retry",
+                "tool_retry",
+                "tool_completed",
+            ],
+        )
+        self.assertEqual(
+            model.calls,
+            2,
         )
 
 
