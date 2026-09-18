@@ -1,7 +1,10 @@
 import unittest
 from unittest.mock import patch
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from agent.core.events import RuntimeEvent
+from agent.core.profile import AgentProfile
 from agent.core.runtime import AgentRuntime
 
 
@@ -33,7 +36,6 @@ class SequentialPlanningModel:
 
         self.calls += 1
         return response
-
 
 
 class RuntimeEventTests(unittest.TestCase):
@@ -333,8 +335,6 @@ class RuntimeEventStreamTests(unittest.TestCase):
         )
 
 
-
-
     def test_resume_runtime_events_normalizes_and_filters(self):
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -383,6 +383,96 @@ class RuntimeEventStreamTests(unittest.TestCase):
         self.assertEqual(
             result[0].name,
             "finalize",
+        )
+
+    def test_resume_runtime_events_completes_approved_agent_tool_chain(
+            self,
+    ):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="event-approval-profile",
+                require_tool_approval=True,
+            ),
+        )
+        model = SequentialPlanningModel()
+        thread_id = "runtime-event-approval-sync-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_events = list(
+                runtime.stream_runtime_events(
+                    "请执行 Python 代码计算 2 加 3",
+                    thread_id=thread_id,
+                    event_types="on_chain_end",
+                )
+            )
+
+            paused_plan_events = [
+                event
+                for event in paused_events
+                if event.name == "agent_plan"
+            ]
+
+            self.assertTrue(
+                paused_plan_events,
+            )
+            self.assertEqual(
+                paused_plan_events[-1].data["output"]["status"],
+                "paused",
+            )
+            self.assertEqual(
+                model.calls,
+                1,
+            )
+
+            resumed_events = list(
+                runtime.resume_runtime_events(
+                    {
+                        "approved": True,
+                    },
+                    thread_id=thread_id,
+                    event_types="on_chain_end",
+                )
+            )
+
+        agent_tool_events = [
+            event
+            for event in resumed_events
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+        self.assertEqual(
+            agent_tool_events[0].tool_events[-1]["event_type"],
+            "tool_completed",
+        )
+        self.assertEqual(
+            agent_tool_events[0].tool_events[-1]["tool_name"],
+            "python_executor",
+        )
+
+        finalize_events = [
+            event
+            for event in resumed_events
+            if event.name == "finalize"
+        ]
+
+        self.assertTrue(
+            finalize_events,
+        )
+        self.assertEqual(
+            finalize_events[-1].data["output"]["status"],
+            "completed",
+        )
+        self.assertEqual(
+            model.calls,
+            2,
         )
 
 
@@ -920,6 +1010,99 @@ class AsyncRuntimeEventStreamTests(
         self.assertEqual(
             tool_events[-1]["call_count"],
             1,
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+
+
+    async def test_aresume_runtime_events_completes_approved_agent_tool_chain(
+            self,
+    ):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="async-event-approval-profile",
+                require_tool_approval=True,
+            ),
+        )
+        model = SequentialPlanningModel()
+        thread_id = "runtime-event-approval-async-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_events = [
+                event
+                async for event in runtime.astream_runtime_events(
+                    "请执行 Python 代码计算 2 加 3",
+                    thread_id=thread_id,
+                    event_types="on_chain_end",
+                )
+            ]
+
+            paused_plan_events = [
+                event
+                for event in paused_events
+                if event.name == "agent_plan"
+            ]
+
+            self.assertTrue(
+                paused_plan_events,
+            )
+            self.assertEqual(
+                paused_plan_events[-1].data["output"]["status"],
+                "paused",
+            )
+            self.assertEqual(
+                model.calls,
+                1,
+            )
+
+            resumed_events = [
+                event
+                async for event in runtime.aresume_runtime_events(
+                    {
+                        "approved": True,
+                    },
+                    thread_id=thread_id,
+                    event_types="on_chain_end",
+                )
+            ]
+
+        agent_tool_events = [
+            event
+            for event in resumed_events
+            if event.name == "agent_tool"
+        ]
+
+        self.assertEqual(
+            len(agent_tool_events),
+            1,
+        )
+        self.assertEqual(
+            agent_tool_events[0].tool_events[-1]["event_type"],
+            "tool_completed",
+        )
+        self.assertEqual(
+            agent_tool_events[0].tool_events[-1]["tool_name"],
+            "python_executor",
+        )
+
+        finalize_events = [
+            event
+            for event in resumed_events
+            if event.name == "finalize"
+        ]
+
+        self.assertTrue(
+            finalize_events,
+        )
+        self.assertEqual(
+            finalize_events[-1].data["output"]["status"],
+            "completed",
         )
         self.assertEqual(
             model.calls,
