@@ -2,6 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass,field
 from typing import Any,Mapping
+from copy import deepcopy
+
+
+
+def _copy_event_value(value: Any) -> Any:
+    """
+    为运行时事件创建防御性副本。
+
+    某些外部对象可能不可深拷贝，
+    此时保留原值，避免事件标准化失败。
+    """
+    try:
+        return deepcopy(value)
+    except Exception:
+        return value
 
 
 @dataclass(frozen=True)
@@ -69,10 +84,14 @@ class RuntimeEvent:
                     or []
                 )
             ),
-            metadata=dict(
-                raw_event.get("metadata") or {}
+            metadata=_copy_event_value(
+                dict(
+                    raw_event.get("metadata") or {}
+                )
             ),
-            data=raw_event.get("data")
+            data=_copy_event_value(
+                raw_event.get("data")
+            ),
         )
 
 
@@ -104,7 +123,9 @@ class RuntimeEvent:
                 continue
 
             return [
-                dict(item)
+                _copy_event_value(
+                    dict(item)
+                )
                 for item in raw_events
                 if isinstance(
                     item,
@@ -123,6 +144,10 @@ class RuntimeEvent:
             "run_id": self.run_id,
             "parent_ids": list(self.parent_ids),
             "tags": list(self.tags),
-            "metadata": dict(self.metadata),
-            "data": self.data,
+            "metadata": _copy_event_value(
+                self.metadata
+            ),
+            "data": _copy_event_value(
+                self.data
+            ),
         }

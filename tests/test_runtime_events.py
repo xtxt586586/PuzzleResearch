@@ -286,6 +286,118 @@ class RuntimeEventStreamTests(unittest.TestCase):
         )
 
 
+    def test_from_raw_isolates_nested_data(self):
+        raw_event = {
+            "event": "on_chain_end",
+            "metadata": {
+                "labels": [
+                    "original",
+                ],
+            },
+            "data": {
+                "output": {
+                    "tool_events": [
+                        {
+                            "event_type": "tool_completed",
+                            "tool_name": "echo",
+                            "details": {
+                                "attempt": 1,
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+
+        event = RuntimeEvent.from_raw(raw_event)
+
+        raw_event["metadata"]["labels"].append(
+            "mutated",
+        )
+        raw_event["data"]["output"]["tool_events"][0][
+            "details"
+        ]["attempt"] = 99
+
+        self.assertEqual(
+            event.metadata["labels"],
+            ["original"],
+        )
+        self.assertEqual(
+            event.tool_events[0]["details"]["attempt"],
+            1,
+        )
+
+    def test_tool_events_return_defensive_copies(self):
+        event = RuntimeEvent.from_raw(
+            {
+                "event": "on_chain_end",
+                "data": {
+                    "tool_events": [
+                        {
+                            "event_type": "tool_completed",
+                            "tool_name": "echo",
+                            "details": {
+                                "attempt": 1,
+                            },
+                        },
+                    ],
+                },
+            }
+        )
+
+        extracted_events = event.tool_events
+        extracted_events[0]["details"]["attempt"] = 99
+        extracted_events.append(
+            {
+                "event_type": "tool_failed",
+            }
+        )
+
+        self.assertEqual(
+            event.tool_events,
+            [
+                {
+                    "event_type": "tool_completed",
+                    "tool_name": "echo",
+                    "details": {
+                        "attempt": 1,
+                    },
+                },
+            ],
+        )
+
+    def test_to_dict_returns_defensive_copies(self):
+        event = RuntimeEvent.from_raw(
+            {
+                "event": "on_chain_end",
+                "metadata": {
+                    "labels": [
+                        "original",
+                    ],
+                },
+                "data": {
+                    "status": "completed",
+                },
+            }
+        )
+
+        result = event.to_dict()
+
+        result["metadata"]["labels"].append(
+            "mutated",
+        )
+        result["data"]["status"] = "changed"
+
+        self.assertEqual(
+            event.metadata["labels"],
+            ["original"],
+        )
+        self.assertEqual(
+            event.data["status"],
+            "completed",
+        )
+
+
 class AsyncRuntimeEventStreamTests(
         unittest.IsolatedAsyncioTestCase,
 ):
