@@ -62,13 +62,11 @@ class AgentRuntimeTests(unittest.TestCase):
             registry,
         )
 
-
     def test_invoke_rejects_empty_input(self):
         runtime = AgentRuntime()
 
         with self.assertRaises(ValueError):
             runtime.invoke("   ")
-
 
     def test_checkpointer_requires_thread_id(self):
         runtime = AgentRuntime(
@@ -81,7 +79,6 @@ class AgentRuntimeTests(unittest.TestCase):
         ):
             runtime.invoke("测试请求")
 
-
     def test_resume_requires_checkpointer(self):
         runtime = AgentRuntime()
 
@@ -93,7 +90,6 @@ class AgentRuntimeTests(unittest.TestCase):
                 {"approved": True},
                 thread_id="thread-001",
             )
-
 
     def test_resume_builds_langgraph_command(self):
         runtime = AgentRuntime(
@@ -129,86 +125,49 @@ class AgentRuntimeTests(unittest.TestCase):
             "thread-001",
         )
 
-
-
-class AgentRuntimeAsyncTests(
-        unittest.IsolatedAsyncioTestCase,
-):
-    async def test_ainvoke_forwards_payload_and_config(self):
+    def test_describe_default_tools(self):
         runtime = AgentRuntime()
 
-        with patch.object(
-            runtime.graph,
-            "ainvoke",
-            new_callable=AsyncMock,
-            return_value={
-                "status": "completed",
-            },
-        ) as graph_ainvoke:
-            result = await runtime.ainvoke(
-                "异步测试请求",
-                thread_id="async-thread-001",
+        result = runtime.describe_tools()
+
+        self.assertEqual(
+            len(result),
+            1,
+        )
+        self.assertEqual(
+            result[0]["name"],
+            "python_executor",
+        )
+        self.assertTrue(
+            result[0]["enabled"],
+        )
+        self.assertTrue(
+            any(
+                item["name"] == "code"
+                and item["required"] is True
+                for item in result[0]["parameters"]
             )
-
-        self.assertEqual(
-            result["status"],
-            "completed",
         )
 
-        payload = graph_ainvoke.call_args.args[0]
-        runtime_config = graph_ainvoke.call_args.kwargs["config"]
-
-        self.assertEqual(
-            payload["input"],
-            "异步测试请求",
+    def test_describe_tools_applies_profile_policy(self):
+        profile = AgentProfile(
+            name="restricted-profile",
+            enabled_tools=frozenset(),
         )
-        self.assertEqual(
-            payload["messages"],
-            [],
-        )
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-thread-001",
-        )
-
-
-    async def test_aresume_forwards_command_and_config(self):
-        from langgraph.checkpoint.memory import InMemorySaver
 
         runtime = AgentRuntime(
-            checkpointer=InMemorySaver(),
+            profile=profile,
         )
 
-        with patch.object(
-            runtime.graph,
-            "ainvoke",
-            new_callable=AsyncMock,
-            return_value={
-                "status": "completed",
-            },
-        ) as graph_ainvoke:
-            result = await runtime.aresume(
-                {"approved": True},
-                thread_id="async-thread-002",
-            )
+        result = runtime.describe_tools()
 
         self.assertEqual(
-            result["status"],
-            "completed",
+            len(result),
+            1,
         )
-
-        command = graph_ainvoke.call_args.args[0]
-        runtime_config = graph_ainvoke.call_args.kwargs["config"]
-
-        self.assertIsInstance(
-            command,
-            Command,
+        self.assertFalse(
+            result[0]["enabled"],
         )
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-thread-002",
-        )
-
 
     def test_get_state_forwards_thread_and_subgraphs(self):
         runtime = AgentRuntime(
@@ -244,7 +203,6 @@ class AgentRuntimeAsyncTests(
             graph_get_state.call_args.kwargs["subgraphs"],
         )
 
-
     def test_get_state_requires_checkpointer(self):
         runtime = AgentRuntime()
 
@@ -255,7 +213,6 @@ class AgentRuntimeAsyncTests(
             runtime.get_state(
                 thread_id="state-thread-002",
             )
-
 
     def test_get_state_history_forwards_limit(self):
         runtime = AgentRuntime(
@@ -294,7 +251,6 @@ class AgentRuntimeAsyncTests(
             graph_get_history.call_args.kwargs["limit"],
             2,
         )
-
 
     def test_stream_forwards_payload_and_mode(self):
         runtime = AgentRuntime()
@@ -342,135 +298,6 @@ class AgentRuntimeAsyncTests(
             "updates",
         )
 
-
-    async def test_aget_state_forwards_thread(self):
-        runtime = AgentRuntime(
-            checkpointer=InMemorySaver(),
-        )
-
-        with patch.object(
-            runtime.graph,
-            "aget_state",
-            new_callable=AsyncMock,
-            return_value={
-                "values": {
-                    "status": "completed",
-                },
-            },
-        ) as graph_aget_state:
-            result = await runtime.aget_state(
-                thread_id="async-state-thread-001",
-            )
-
-        self.assertEqual(
-            result["values"]["status"],
-            "completed",
-        )
-
-        runtime_config = graph_aget_state.call_args.args[0]
-
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-state-thread-001",
-        )
-
-
-    async def test_aget_state_history_forwards_limit(self):
-        runtime = AgentRuntime(
-            checkpointer=InMemorySaver(),
-        )
-
-        async def snapshot_stream():
-            yield {"id": "async-snapshot-1"}
-            yield {"id": "async-snapshot-2"}
-
-        with patch.object(
-            runtime.graph,
-            "aget_state_history",
-            return_value=snapshot_stream(),
-        ) as graph_aget_history:
-            result = [
-                snapshot
-                async for snapshot in runtime.aget_state_history(
-                    thread_id="async-history-thread-001",
-                    limit=2,
-                )
-            ]
-
-        self.assertEqual(
-            result,
-            [
-                {"id": "async-snapshot-1"},
-                {"id": "async-snapshot-2"},
-            ],
-        )
-
-        runtime_config = graph_aget_history.call_args.args[0]
-
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-history-thread-001",
-        )
-        self.assertEqual(
-            graph_aget_history.call_args.kwargs["limit"],
-            2,
-        )
-
-
-    async def test_astream_forwards_payload_and_mode(self):
-        runtime = AgentRuntime()
-
-        async def chunk_stream():
-            yield {
-                "status": "running",
-            }
-            yield {
-                "status": "completed",
-            }
-
-        with patch.object(
-            runtime.graph,
-            "astream",
-            return_value=chunk_stream(),
-        ) as graph_astream:
-            result = [
-                chunk
-                async for chunk in runtime.astream(
-                    "异步流式测试请求",
-                    thread_id="async-stream-thread-001",
-                    stream_mode="updates",
-                )
-            ]
-
-        self.assertEqual(
-            result,
-            [
-                {
-                    "status": "running",
-                },
-                {
-                    "status": "completed",
-                },
-            ],
-        )
-
-        payload = graph_astream.call_args.args[0]
-        runtime_config = graph_astream.call_args.kwargs["config"]
-
-        self.assertEqual(
-            payload["input"],
-            "异步流式测试请求",
-        )
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-stream-thread-001",
-        )
-        self.assertEqual(
-            graph_astream.call_args.kwargs["stream_mode"],
-            "updates",
-        )
-
-
     def test_stream_events_forwards_version_and_filters(self):
         runtime = AgentRuntime()
 
@@ -497,7 +324,10 @@ class AgentRuntimeAsyncTests(
                 )
             )
 
-        self.assertEqual(result, events)
+        self.assertEqual(
+            result,
+            events,
+        )
 
         payload = graph_stream_events.call_args.args[0]
         runtime_config = graph_stream_events.call_args.kwargs["config"]
@@ -519,7 +349,6 @@ class AgentRuntimeAsyncTests(
             ["agent_tool"],
         )
 
-
     def test_resume_events_requires_checkpointer(self):
         runtime = AgentRuntime()
 
@@ -531,7 +360,6 @@ class AgentRuntimeAsyncTests(
                 {"approved": True},
                 thread_id="events-thread-002",
             )
-
 
     def test_resume_events_forwards_command(self):
         runtime = AgentRuntime(
@@ -556,114 +384,22 @@ class AgentRuntimeAsyncTests(
                 )
             )
 
-        self.assertEqual(result, events)
+        self.assertEqual(
+            result,
+            events,
+        )
 
         command = graph_stream_events.call_args.args[0]
         runtime_config = graph_stream_events.call_args.kwargs["config"]
 
-        self.assertIsInstance(command, Command)
+        self.assertIsInstance(
+            command,
+            Command,
+        )
         self.assertEqual(
             runtime_config["configurable"]["thread_id"],
             "events-thread-003",
         )
-
-
-    async def test_astream_events_forwards_version(self):
-        runtime = AgentRuntime()
-
-        async def event_stream():
-            yield {
-                "event": "on_chain_start",
-            }
-            yield {
-                "event": "on_chain_end",
-            }
-
-        with patch.object(
-            runtime.graph,
-            "astream_events",
-            return_value=event_stream(),
-        ) as graph_astream_events:
-            result = [
-                event
-                async for event in runtime.astream_events(
-                    "异步事件流测试请求",
-                    thread_id="async-events-thread-001",
-                    version="v2",
-                )
-            ]
-
-        self.assertEqual(
-            result,
-            [
-                {
-                    "event": "on_chain_start",
-                },
-                {
-                    "event": "on_chain_end",
-                },
-            ],
-        )
-
-        payload = graph_astream_events.call_args.args[0]
-        runtime_config = graph_astream_events.call_args.kwargs["config"]
-
-        self.assertEqual(
-            payload["input"],
-            "异步事件流测试请求",
-        )
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-events-thread-001",
-        )
-        self.assertEqual(
-            graph_astream_events.call_args.kwargs["version"],
-            "v2",
-        )
-
-
-    async def test_aresume_events_forwards_command(self):
-        runtime = AgentRuntime(
-            checkpointer=InMemorySaver(),
-        )
-
-        async def event_stream():
-            yield {
-                "event": "on_chain_end",
-            }
-
-        with patch.object(
-            runtime.graph,
-            "astream_events",
-            return_value=event_stream(),
-        ) as graph_astream_events:
-            result = [
-                event
-                async for event in runtime.aresume_events(
-                    {"approved": True},
-                    thread_id="async-events-thread-002",
-                )
-            ]
-
-        self.assertEqual(
-            result,
-            [
-                {
-                    "event": "on_chain_end",
-                },
-            ],
-        )
-
-        command = graph_astream_events.call_args.args[0]
-        runtime_config = graph_astream_events.call_args.kwargs["config"]
-
-        self.assertIsInstance(command, Command)
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-events-thread-002",
-        )
-
-
 
     def test_cancel_persists_cancelled_state(self):
         runtime = AgentRuntime(
@@ -723,7 +459,6 @@ class AgentRuntimeAsyncTests(
         )
         graph_get_state.assert_called_once()
 
-
     def test_cancel_generates_token_when_missing(self):
         runtime = AgentRuntime(
             checkpointer=InMemorySaver(),
@@ -757,7 +492,6 @@ class AgentRuntimeAsyncTests(
             generated_token,
         )
 
-
     def test_cancel_requires_checkpointer(self):
         runtime = AgentRuntime()
 
@@ -768,7 +502,6 @@ class AgentRuntimeAsyncTests(
             runtime.cancel(
                 thread_id="cancel-thread-003",
             )
-
 
     def test_cancel_rejects_blank_token(self):
         runtime = AgentRuntime(
@@ -783,67 +516,6 @@ class AgentRuntimeAsyncTests(
                 thread_id="cancel-thread-004",
                 cancel_token_id="   ",
             )
-
-
-    async def test_acancel_persists_cancelled_state(self):
-        runtime = AgentRuntime(
-            checkpointer=InMemorySaver(),
-        )
-
-        cancelled_snapshot = {
-            "values": {
-                "status": "cancelled",
-                "is_cancelled": True,
-                "cancel_token_id": "async-cancel-001",
-                "pending_tool_calls": [],
-            },
-        }
-
-        with patch.object(
-            runtime.graph,
-            "aupdate_state",
-            new_callable=AsyncMock,
-            return_value={},
-        ) as graph_aupdate_state, patch.object(
-            runtime.graph,
-            "aget_state",
-            new_callable=AsyncMock,
-            return_value=cancelled_snapshot,
-        ) as graph_aget_state:
-            result = await runtime.acancel(
-                thread_id="async-cancel-thread-001",
-                cancel_token_id="async-cancel-001",
-            )
-
-        self.assertEqual(
-            result,
-            cancelled_snapshot,
-        )
-
-        runtime_config = graph_aupdate_state.call_args.args[0]
-        update_values = graph_aupdate_state.call_args.args[1]
-
-        self.assertEqual(
-            runtime_config["configurable"]["thread_id"],
-            "async-cancel-thread-001",
-        )
-        self.assertTrue(
-            update_values["is_cancelled"],
-        )
-        self.assertEqual(
-            update_values["status"],
-            "cancelled",
-        )
-        self.assertEqual(
-            update_values["cancel_token_id"],
-            "async-cancel-001",
-        )
-        self.assertEqual(
-            update_values["pending_tool_calls"],
-            [],
-        )
-        graph_aget_state.assert_awaited_once()
-
 
     def test_thread_id_is_normalized(self):
         runtime = AgentRuntime()
@@ -860,15 +532,12 @@ class AgentRuntimeAsyncTests(
                 thread_id="  thread-normalized  ",
             )
 
-        runtime_config = (
-            graph_invoke.call_args.kwargs["config"]
-        )
+        runtime_config = graph_invoke.call_args.kwargs["config"]
 
         self.assertEqual(
             runtime_config["configurable"]["thread_id"],
             "thread-normalized",
         )
-
 
     def test_thread_id_rejects_non_string(self):
         runtime = AgentRuntime()
@@ -878,7 +547,6 @@ class AgentRuntimeAsyncTests(
                 "测试请求",
                 thread_id=123,
             )
-
 
     def test_inspect_thread_returns_summary(self):
         runtime = AgentRuntime(
@@ -947,6 +615,362 @@ class AgentRuntimeAsyncTests(
             snapshot,
         )
 
+
+class AgentRuntimeAsyncTests(
+    unittest.IsolatedAsyncioTestCase,
+):
+    async def test_ainvoke_forwards_payload_and_config(self):
+        runtime = AgentRuntime()
+
+        with patch.object(
+            runtime.graph,
+            "ainvoke",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "completed",
+            },
+        ) as graph_ainvoke:
+            result = await runtime.ainvoke(
+                "异步测试请求",
+                thread_id="async-thread-001",
+            )
+
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+
+        payload = graph_ainvoke.call_args.args[0]
+        runtime_config = graph_ainvoke.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "异步测试请求",
+        )
+        self.assertEqual(
+            payload["messages"],
+            [],
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-thread-001",
+        )
+
+    async def test_aresume_forwards_command_and_config(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        with patch.object(
+            runtime.graph,
+            "ainvoke",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "completed",
+            },
+        ) as graph_ainvoke:
+            result = await runtime.aresume(
+                {"approved": True},
+                thread_id="async-thread-002",
+            )
+
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+
+        command = graph_ainvoke.call_args.args[0]
+        runtime_config = graph_ainvoke.call_args.kwargs["config"]
+
+        self.assertIsInstance(
+            command,
+            Command,
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-thread-002",
+        )
+
+    async def test_aget_state_forwards_thread(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        with patch.object(
+            runtime.graph,
+            "aget_state",
+            new_callable=AsyncMock,
+            return_value={
+                "values": {
+                    "status": "completed",
+                },
+            },
+        ) as graph_aget_state:
+            result = await runtime.aget_state(
+                thread_id="async-state-thread-001",
+            )
+
+        self.assertEqual(
+            result["values"]["status"],
+            "completed",
+        )
+
+        runtime_config = graph_aget_state.call_args.args[0]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-state-thread-001",
+        )
+
+    async def test_aget_state_history_forwards_limit(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        async def snapshot_stream():
+            yield {"id": "async-snapshot-1"}
+            yield {"id": "async-snapshot-2"}
+
+        with patch.object(
+            runtime.graph,
+            "aget_state_history",
+            return_value=snapshot_stream(),
+        ) as graph_aget_history:
+            result = [
+                snapshot
+                async for snapshot in runtime.aget_state_history(
+                    thread_id="async-history-thread-001",
+                    limit=2,
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {"id": "async-snapshot-1"},
+                {"id": "async-snapshot-2"},
+            ],
+        )
+
+        runtime_config = graph_aget_history.call_args.args[0]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-history-thread-001",
+        )
+        self.assertEqual(
+            graph_aget_history.call_args.kwargs["limit"],
+            2,
+        )
+
+    async def test_astream_forwards_payload_and_mode(self):
+        runtime = AgentRuntime()
+
+        async def chunk_stream():
+            yield {
+                "status": "running",
+            }
+            yield {
+                "status": "completed",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream",
+            return_value=chunk_stream(),
+        ) as graph_astream:
+            result = [
+                chunk
+                async for chunk in runtime.astream(
+                    "异步流式测试请求",
+                    thread_id="async-stream-thread-001",
+                    stream_mode="updates",
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "status": "running",
+                },
+                {
+                    "status": "completed",
+                },
+            ],
+        )
+
+        payload = graph_astream.call_args.args[0]
+        runtime_config = graph_astream.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "异步流式测试请求",
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-stream-thread-001",
+        )
+        self.assertEqual(
+            graph_astream.call_args.kwargs["stream_mode"],
+            "updates",
+        )
+
+    async def test_astream_events_forwards_version(self):
+        runtime = AgentRuntime()
+
+        async def event_stream():
+            yield {
+                "event": "on_chain_start",
+            }
+            yield {
+                "event": "on_chain_end",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=event_stream(),
+        ) as graph_astream_events:
+            result = [
+                event
+                async for event in runtime.astream_events(
+                    "异步事件流测试请求",
+                    thread_id="async-events-thread-001",
+                    version="v2",
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "event": "on_chain_start",
+                },
+                {
+                    "event": "on_chain_end",
+                },
+            ],
+        )
+
+        payload = graph_astream_events.call_args.args[0]
+        runtime_config = graph_astream_events.call_args.kwargs["config"]
+
+        self.assertEqual(
+            payload["input"],
+            "异步事件流测试请求",
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-events-thread-001",
+        )
+        self.assertEqual(
+            graph_astream_events.call_args.kwargs["version"],
+            "v2",
+        )
+
+    async def test_aresume_events_forwards_command(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        async def event_stream():
+            yield {
+                "event": "on_chain_end",
+            }
+
+        with patch.object(
+            runtime.graph,
+            "astream_events",
+            return_value=event_stream(),
+        ) as graph_astream_events:
+            result = [
+                event
+                async for event in runtime.aresume_events(
+                    {"approved": True},
+                    thread_id="async-events-thread-002",
+                )
+            ]
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "event": "on_chain_end",
+                },
+            ],
+        )
+
+        command = graph_astream_events.call_args.args[0]
+        runtime_config = graph_astream_events.call_args.kwargs["config"]
+
+        self.assertIsInstance(
+            command,
+            Command,
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-events-thread-002",
+        )
+
+    async def test_acancel_persists_cancelled_state(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+
+        cancelled_snapshot = {
+            "values": {
+                "status": "cancelled",
+                "is_cancelled": True,
+                "cancel_token_id": "async-cancel-001",
+                "pending_tool_calls": [],
+            },
+        }
+
+        with patch.object(
+            runtime.graph,
+            "aupdate_state",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as graph_aupdate_state, patch.object(
+            runtime.graph,
+            "aget_state",
+            new_callable=AsyncMock,
+            return_value=cancelled_snapshot,
+        ) as graph_aget_state:
+            result = await runtime.acancel(
+                thread_id="async-cancel-thread-001",
+                cancel_token_id="async-cancel-001",
+            )
+
+        self.assertEqual(
+            result,
+            cancelled_snapshot,
+        )
+
+        runtime_config = graph_aupdate_state.call_args.args[0]
+        update_values = graph_aupdate_state.call_args.args[1]
+
+        self.assertEqual(
+            runtime_config["configurable"]["thread_id"],
+            "async-cancel-thread-001",
+        )
+        self.assertTrue(
+            update_values["is_cancelled"],
+        )
+        self.assertEqual(
+            update_values["status"],
+            "cancelled",
+        )
+        self.assertEqual(
+            update_values["cancel_token_id"],
+            "async-cancel-001",
+        )
+        self.assertEqual(
+            update_values["pending_tool_calls"],
+            [],
+        )
+        graph_aget_state.assert_awaited_once()
 
     async def test_ainspect_thread_returns_summary(self):
         runtime = AgentRuntime(
