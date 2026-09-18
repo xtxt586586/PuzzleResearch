@@ -970,6 +970,7 @@ class AgentRuntimeAsyncTests(
             update_values["pending_tool_calls"],
             [],
         )
+        graph_aupdate_state.assert_awaited_once()
         graph_aget_state.assert_awaited_once()
 
     async def test_ainspect_thread_returns_summary(self):

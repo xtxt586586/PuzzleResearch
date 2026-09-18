@@ -18,6 +18,71 @@ class ToolDefinition:
     description: str
     handler: ToolHandler
 
+
+    def argument_schema(self) -> list[dict[str,Any]]:
+        """
+        返回工具参数的机器可读描述。
+        """
+        try:
+            signature = inspect.signature(self.handler)
+        except (TypeError, ValueError):
+            return []
+
+        parameters: list[dict[str,Any]] = []
+
+        for parameter in signature.parameters.values():
+            if parameter.kind in {
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            }:
+                continue
+
+            annotation = parameter.annotation
+
+            if annotation is inspect.Parameter.empty:
+                annotation_name = None
+
+            elif isinstance(annotation,str):
+                annotation_name = annotation
+
+            else:
+                annotation_name = getattr(
+                    annotation,
+                    "__name__",
+                    str(annotation),
+                )
+
+            item: dict[str,Any] = {
+                "name": parameter.name,
+                "required": (
+                    parameter.default
+                    is inspect.Parameter.empty
+                ),
+                "annotation": annotation_name,
+            }
+
+            if parameter.default is not inspect.Parameter.empty:
+                item["default"] = parameter.default
+
+            parameters.append(item)
+
+        return parameters
+
+
+    def to_schema(self) -> dict[str,Any]:
+        """
+        返回单个工具的机器可读定义。
+        """
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.argument_schema(),
+        }
+
+
+
+
     def format_argument_contract(self) -> str:
         """
         生成人类和模型都容易理解的参数契约。
@@ -156,6 +221,17 @@ class ToolRegistry:
         """
 
         return list(self._tools.values())
+
+
+    def describe_tools(self) -> list[dict[str,Any]]:
+        """
+        返回所有工具的机器可读目录。
+        """
+
+        return [
+            tool.to_schema()
+            for tool in self.list_tools()
+        ]
 
 
     def invoke(

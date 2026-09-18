@@ -11,6 +11,7 @@ from agent.core.graph import create_research_graph
 from agent.core.profile import AgentProfile
 from tools.registry import ToolRegistry
 from agent.core.events import RuntimeEvent
+from tools.builtin import create_default_registry
 
 
 class AgentRuntime:
@@ -359,7 +360,7 @@ class AgentRuntime:
 
         resolved_token = self._resolve_cancel_token(cancel_token_id)
 
-        self.graph.aupdate_state(
+        await self.graph.aupdate_state(
             runtime_config,
             {
                 "is_cancelled": True,
@@ -933,3 +934,56 @@ class AgentRuntime:
                 continue
 
             yield event
+
+
+    def describe_tools(self) -> list[dict[str,Any]]:
+        """
+        返回当前运行时可用工具目录。
+
+        如果没有注入自定义注册表，
+        则返回默认工具目录。
+        """
+
+        registry = (
+            self._registry
+            if self._registry is not None
+            else create_default_registry()
+        )
+
+        catalog = registry.describe_tools()
+
+        if self._profile is None:
+            return [
+                {
+                    **item,
+                    "enabled": True
+                }
+                for item in catalog
+            ]
+
+        enabled_tools = self._profile.enabled_tools
+        blocked_tools = (
+            self._profile.blocked_tools or frozenset()
+        )
+
+        result: list[dict[str,Any]] = []
+
+        for item in catalog:
+            tool_name = item["name"]
+
+            is_enabled = (
+                enabled_tools is None
+                or tool_name in enabled_tools
+            )
+
+            if tool_name in blocked_tools:
+                is_enabled = False
+
+            result.append(
+                {
+                    **item,
+                    "enabled": is_enabled,
+                }
+            )
+
+        return result

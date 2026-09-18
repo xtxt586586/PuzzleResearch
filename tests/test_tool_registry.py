@@ -162,6 +162,64 @@ class ToolRegistryTests(unittest.TestCase):
             "无参数",
         )
 
+    def test_argument_schema_describes_required_and_optional(self):
+        def search(
+                query: str,
+                limit: int = 5,
+        ) -> str:
+            return f"{query}:{limit}"
+
+        tool = ToolDefinition(
+            name="search",
+            description="搜索内容",
+            handler=search,
+        )
+
+        self.assertEqual(
+            tool.argument_schema(),
+            [
+                {
+                    "name": "query",
+                    "required": True,
+                    "annotation": "str",
+                },
+                {
+                    "name": "limit",
+                    "required": False,
+                    "annotation": "int",
+                    "default": 5,
+                },
+            ],
+        )
+
+
+    def test_registry_describes_tools(self):
+        def ping() -> str:
+            return "pong"
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="ping",
+                    description="健康检查",
+                    handler=ping,
+                ),
+            ]
+        )
+
+        result = registry.describe_tools()
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "name": "ping",
+                    "description": "健康检查",
+                    "parameters": [],
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
