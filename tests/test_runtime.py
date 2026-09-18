@@ -69,6 +69,81 @@ class AgentRuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runtime.invoke("   ")
 
+
+    def test_invoke_completes_agent_tool_loop(self):
+        class SequentialPlanningModel:
+            def __init__(self):
+                self.responses = [
+                    (
+                        '{"action": "tool", '
+                        '"tool_name": "python_executor", '
+                        '"arguments": {'
+                        '"code": "print(2 + 3)"'
+                        "}}"
+                    ),
+                    (
+                        '{"action": "finish", '
+                        '"final_report": "计算完成，结果是 5。"}'
+                    ),
+                ]
+                self.calls = 0
+
+            def invoke(self, messages, config=None):
+                response = type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "content": self.responses[self.calls],
+                    },
+                )()
+
+                self.calls += 1
+                return response
+
+        model = SequentialPlanningModel()
+        runtime = AgentRuntime()
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = runtime.invoke(
+                "请执行 Python 代码计算 2 加 3，然后告诉我结果",
+            )
+
+        self.assertEqual(
+            result["route"],
+            "agent",
+        )
+        self.assertEqual(
+            result["status"],
+            "completed",
+        )
+        self.assertTrue(
+            result["is_complete"],
+        )
+        self.assertEqual(
+            result["tool_call_count"],
+            1,
+        )
+        self.assertEqual(
+            model.calls,
+            2,
+        )
+        self.assertEqual(
+            len(result["tool_results"]),
+            1,
+        )
+        self.assertEqual(
+            result["tool_results"][0]["result"]["output"].strip(),
+            "5",
+        )
+        self.assertEqual(
+            result["final_report"],
+            "计算完成，结果是 5。",
+        )
+
+
     def test_checkpointer_requires_thread_id(self):
         runtime = AgentRuntime(
             checkpointer=InMemorySaver(),
