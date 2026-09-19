@@ -4,6 +4,7 @@ import json
 import time
 import re
 from typing import Dict,Any
+from collections.abc import Mapping
 
 from langchain_core.messages import AIMessage,HumanMessage,SystemMessage
 from langgraph.types import interrupt
@@ -174,6 +175,56 @@ def _select_deep_search_results(
 
 
 
+def _configured_route(
+        config: RunnableConfig,
+) -> str | None:
+    if not isinstance(config,Mapping):
+        return None
+
+    configurable = config.get("configurable",{})
+
+    if not isinstance(configurable,Mapping):
+        return None
+
+    search_mode = configurable.get("search_mode")
+
+    if isinstance(search_mode,Mapping):
+        mode = str(
+            search_mode.get("mode","")
+        ).strip().lower()
+
+        if mode in {
+            "direct",
+            "web",
+            "deep",
+            "agent",
+            "clarify",
+        }:
+            return mode
+
+        if bool(search_mode.get("useDeepSearch")):
+            return "deep"
+
+        if bool(search_mode.get("useAgent")):
+            return "agent"
+
+        if bool(search_mode.get("useWebSearch")):
+            return "web"
+
+    if isinstance(search_mode,str):
+        mode = str(search_mode).strip().lower()
+
+        if mode in {
+            "direct",
+            "web",
+            "deep",
+            "agent",
+            "clarify",
+        }:
+            return mode
+
+    return None
+
 
 
 def router_node(
@@ -189,20 +240,38 @@ def router_node(
 
     user_input = state.get("input","").strip()
 
-    result = smart_route(
-        user_input,
-        config=config,
-    )
+    forced_route = _configured_route(config)
+
+    if forced_route is not None:
+        result = {
+            "route": forced_route,
+            "routing_reasoning": (
+                "客户端通过 search_mode 明确指定执行路径。"
+            ),
+            "routing_confidence": 1.0,
+            "suggested_queries": [],
+            "clarification_question": "",
+            "needs_clarification": (
+                forced_route == "clarify"
+            ),
+        }
+    else:
+        result = smart_route(
+            user_input,
+            config=config,
+        )
 
     print(
-        "[route_node]",
+        "[router_node]",
         f"route={result['route']}",
-        f"confidence={result['routing_confidence']:.2f}"
+        f"confidence={result['routing_confidence']:.2f}",
     )
 
     return {
         **result,
-        "messages": [HumanMessage(content=user_input)],
+        "messages": [
+            HumanMessage(content=user_input)
+        ],
     }
 
 

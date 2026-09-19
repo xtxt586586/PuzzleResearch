@@ -17,6 +17,7 @@ from agent.workflows.nodes import (
     _parse_plan_response,
     agent_tool_node,
     finalize_node,
+    router_node,
 )
 from common.config import settings
 
@@ -476,6 +477,33 @@ class CoreContractTests(unittest.TestCase):
         self.assertEqual(
             result["final_report"],
             "任务已取消",
+        )
+
+
+    def test_router_honors_search_mode_override(self):
+        with patch(
+            "agent.workflows.nodes.smart_route",
+            side_effect=AssertionError(
+                "explicit search_mode should bypass LLM routing"
+            ),
+        ):
+            result = router_node(
+                {
+                    "input": "普通问题",
+                },
+                {
+                    "configurable": {
+                        "search_mode": {
+                            "mode": "web",
+                        },
+                    },
+                },
+            )
+
+        self.assertEqual(result["route"], "web")
+        self.assertEqual(
+            result["routing_confidence"],
+            1.0,
         )
 
 

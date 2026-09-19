@@ -2,6 +2,10 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+from unittest.mock import AsyncMock, patch
+
+import main
+from agent.core.events import RuntimeEvent
 from main import app
 
 
@@ -93,6 +97,166 @@ class PublicApiTests(unittest.TestCase):
         self.assertNotIn(
             "tavily_api_key",
             serialized,
+        )
+
+
+    def test_chat_non_stream_returns_response(self):
+        with patch.object(
+            main.chat_runtime,
+            "ainvoke",
+            new=AsyncMock(
+                return_value={
+                    "final_report": "测试回答",
+                    "status": "completed",
+                }
+            ),
+        ) as invoke:
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "你好",
+                        }
+                    ],
+                    "stream": False,
+                    "search_mode": {
+                        "useDeepSearch": True,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["content"],
+            "测试回答",
+        )
+
+        config = invoke.await_args.kwargs["config"]
+
+        self.assertEqual(
+            config["configurable"]["search_mode"]["mode"],
+            "deep",
+        )
+        self.assertTrue(
+            config["configurable"]["thread_id"].startswith(
+                "thread_"
+            )
+        )
+
+    def test_chat_rejects_missing_user_message(self):
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "旧回答",
+                    }
+                ],
+                "stream": False,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_chat_stream_uses_legacy_protocol(self):
+        async def fake_events(*args, **kwargs):
+            yield RuntimeEvent(
+                event="on_chain_end",
+                name="finalize",
+                data={
+                    "output": {
+                        "final_report": "流式回答",
+                    }
+                },
+            )
+
+        with patch.object(
+            main.chat_runtime,
+            "astream_runtime_events",
+            new=fake_events,
+        ):
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "测试流式回答",
+                        }
+                    ],
+                    "stream": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            response.headers["content-type"].startswith(
+                "text/event-stream"
+            )
+        )
+        self.assertTrue(
+            response.headers["x-thread-id"].startswith(
+                "thread_"
+            )
+        )
+        self.assertIn(
+            '0:{"type":"completion"',
+            response.text,
+        )
+        self.assertIn(
+            '"流式回答"',
+            response.text,
+        )
+
+    def test_chat_sse_returns_standard_frames(self):
+        async def fake_events(*args, **kwargs):
+            yield RuntimeEvent(
+                event="on_chain_end",
+                name="finalize",
+                data={
+                    "output": {
+                        "final_report": "SSE 回答",
+                    }
+                },
+            )
+
+        with patch.object(
+            main.chat_runtime,
+            "astream_runtime_events",
+            new=fake_events,
+        ):
+            response = self.client.post(
+                "/api/chat/sse",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "测试 SSE",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "retry: 2000",
+            response.text,
+        )
+        self.assertIn(
+            "event: completion",
+            response.text,
+        )
+        self.assertIn(
+            "event: done",
+            response.text,
+        )
+        self.assertTrue(
+            response.headers["x-thread-id"].startswith(
+                "thread_"
+            )
         )
 
 

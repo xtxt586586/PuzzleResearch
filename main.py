@@ -1,12 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime,timezone
 from time import monotonic
+
+import asyncio
+import json
+import uuid
+from collections.abc import AsyncIterator, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+)
+from pydantic import BaseModel, field_validator
 
+from agent.core.events import RuntimeEvent
+from agent.core.runtime import AgentRuntime
 from common.config import settings
 from tools.builtin import create_default_registry
 from tools.search import SearchManager
@@ -19,6 +32,9 @@ app = FastAPI(
     description="PuzzleResearch AI research platform",
     version="0.1.0",
 )
+
+
+chat_runtime = AgentRuntime()
 
 
 class AgentHealthResponse(BaseModel):
@@ -69,6 +85,229 @@ class PublicConfigResponse(BaseModel):
     features: PublicConfigFeatures
     streaming: PublicConfigStreaming
     models: PublicConfigModels
+
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+
+class SearchMode(BaseModel):
+    useWebSearch: bool = False
+    useAgent: bool = False
+    useDeepSearch: bool = False
+
+
+class ImagePayload(BaseModel):
+    name: str | None = None
+    data: str
+    mime: str| None = None
+
+
+def _normalize_search_mode(
+        search_mode: SearchMode | Mapping[str,Any] | str | None,
+) -> dict[str,Any]:
+    if isinstance(search_mode, SearchMode):
+        use_web = search_mode.useWebSearch
+        use_agent = search_mode.useAgent
+        use_deep = search_mode.useDeepSearch
+
+    elif isinstance(search_mode, Mapping):
+        use_web = bool(
+            search_mode.get(
+                "useWebSearch",
+                search_mode.get("use_web",False)
+            )
+        )
+        use_agent = bool(
+            search_mode.get(
+                "useAgent",
+                search_mode.get("use_agent",False)
+            )
+        )
+        use_deep = bool(
+            search_mode.get(
+                "useDeepSearch",
+                search_mode.get("use_deep",False)
+            )
+        )
+
+        if not (use_web or use_agent or use_deep):
+            raw_mode = str(
+                search_mode.get("mode","")
+            ).strip().lower()
+
+            if raw_mode == "web":
+                use_web = True
+            elif raw_mode == "agent":
+                use_agent = True
+            elif raw_mode == "deep":
+                use_agent = True
+                use_deep = True
+
+    elif isinstance(search_mode,str):
+        mode = search_mode.strip().lower()
+
+        use_web = mode in {
+            "web",
+            "search",
+            "tavily",
+        }
+
+        use_agent = mode in {
+            "agent",
+            "mcp",
+            "deep",
+            "deep_agent",
+            "deep-agent",
+            "ultra",
+        }
+        use_deep = mode in {
+            "deep",
+            "deep_agent",
+            "deep-agent",
+            "ultra",
+        }
+
+    else:
+        use_web = False
+        use_agent = False
+        use_deep = False
+
+    if use_deep:
+        use_agent = True
+
+    if use_agent:
+        mode = "deep" if use_deep else "agent"
+    elif use_web:
+        mode = "web"
+    else:
+        mode = "direct"
+
+    return {
+        "use_web": use_web,
+        "use_agent": use_agent,
+        "use_deep": use_deep,
+        "use_deep_prompt": use_deep,
+        "mode": mode,
+    }
+
+
+def _coerce_search_mode_input(
+        value: Any,
+) -> SearchMode | None:
+    if value is None:
+        return None
+
+    if isinstance(value, SearchMode):
+        return value
+
+    normalized = _normalize_search_mode(value)
+
+    return SearchMode(
+        useWebSearch=normalized["use_web"],
+        useAgent=normalized["use_agent"],
+        useDeepSearch=normalized["use_deep"],
+    )
+
+
+
+class ChatRequest(BaseModel):
+    messages: list[Message]
+    stream: bool = True
+    model: str | None = None
+    search_mode: SearchMode | None = None
+    agent_id: str | None = None
+    user_id: str | None = None
+    images: list[ImagePayload] | None = None
+
+    @field_validator("search_mode", mode="before")
+    @classmethod
+    def _coerce_search_mode(
+            cls,
+            value: Any,
+    ) -> SearchMode | None:
+        return _coerce_search_mode_input(value)
+
+
+
+class ChatResponse(BaseModel):
+    id: str
+    content: str
+    role: str = "assistant"
+    timestamp: str
+
+
+def _get_last_user_message(
+        messages: list[Message],
+) -> tuple[int,str]:
+    for index in range(len(messages) - 1,-1,-1):
+        message = messages[index]
+
+        if message.role.strip().lower() == "user":
+            content = message.content.strip()
+
+            if not content:
+                raise HTTPException(
+                    status_code=400,
+                    detail="用户消息不能为空。"
+                )
+
+            return index,content
+
+    raise HTTPException(
+        status_code=400,
+        detail="没有发现用户消息。"
+    )
+
+
+def _to_runtime_message(
+        messages: list[Message]
+) -> list[Any]:
+    result: list[Any] = []
+
+    for message in messages:
+        role = message.role.strip().lower()
+
+        if role == "system":
+            result.append(
+                SystemMessage(content=message.content)
+            )
+        elif role == "assistant":
+            result.append(
+                AIMessage(content=message.content)
+            )
+        else:
+            result.append(
+                HumanMessage(content=message.content)
+            )
+
+    return result
+
+
+def _build_chat_config(
+        *,
+        thread_id: str,
+        model: str,
+        search_mode: dict[str,Any],
+        agent_id: str,
+        user_id: str,
+        images: list[ImagePayload] | None,
+) -> dict[str,Any]:
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "model": model,
+            "search_mode": search_mode,
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "images": [
+                image.model_dump(mode="json")
+                for image in images or []
+            ],
+        },
+        "recursion_limit": 50,
+    }
 
 
 def _timestamp() -> str:
@@ -194,4 +433,424 @@ async def public_config() -> PublicConfigResponse:
             default=settings.primary_model,
             options=_model_options(),
         ),
+    )
+
+
+def _runtime_event_to_legacy_events(
+        event: RuntimeEvent,
+) -> list[dict[str,Any]]:
+    event_data = event.data
+
+    if isinstance(event_data,Mapping):
+        data = dict(event_data)
+
+    else:
+        data = {"value": event_data}
+
+    if event.event == "on_chain_start":
+        return [
+            {
+                "type": "status",
+                "data": {
+                    "text": (
+                        f"开始执行：{event.name or 'agent'}"
+                    ),
+                    "node": event.name,
+                },
+            }
+        ]
+
+    if event.event == "on_chain_error":
+        return [
+            {
+                "type": "error",
+                "data": {
+                    "message": str(
+                        data.get(
+                            "error",
+                            "chain execution failed",
+                        )
+                    ),
+                    "node": event.name,
+                },
+            }
+        ]
+
+    if event.event == "on_tool_start":
+        return [
+            {
+                "type": "tool_start",
+                "data": {
+                    **data,
+                    "tool_name": event.name,
+                },
+            }
+        ]
+
+    if event.event == "on_tool_end":
+        return [
+            {
+                "type": "tool_end",
+                "data": {
+                    **data,
+                    "tool_name": event.name,
+                },
+            }
+        ]
+
+    if event.event == "on_tool_error":
+        return [
+            {
+                "type": "tool_error",
+                "data": {
+                    **data,
+                    "tool_name": event.name,
+                },
+            }
+        ]
+
+    if event.event == "on_chat_model_stream":
+        chunk = data.get("chunk")
+        content = getattr(chunk,"content",None)
+
+        if content is None and isinstance(chunk,Mapping):
+            content = chunk.get("content")
+
+        if content:
+            return [
+                {
+                    "type": "text",
+                    "data": {
+                        "content": str(content),
+                    },
+                }
+            ]
+
+    if event.event == "on_chain_end":
+        output = data.get("output",data)
+
+        if not isinstance(output,Mapping):
+            return []
+
+        converted: list[dict[str,Any]] = []
+
+        for tool_event in output.get("tool_events",[]):
+            if isinstance(tool_event,Mapping):
+                converted.append(
+                    {
+                        "type": "tool",
+                        "data": dict(tool_event),
+                    }
+                )
+
+        sources = output.get("sources")
+
+        if sources:
+            converted.append(
+                {
+                    "type": "sources",
+                    "data": {
+                        "sources": sources,
+                    },
+                }
+            )
+
+        final_report = (
+                output.get("final_report")
+                or output.get("draft_report")
+        )
+
+
+        if final_report:
+            converted.append(
+                {
+                    "type": "completion",
+                    "data": {
+                        "content": str(final_report),
+                    },
+                }
+            )
+
+        return converted
+
+    return []
+
+
+def _format_legacy_event(
+        payload: dict[str,Any]
+) -> str:
+    return (
+        "0:"
+        + json.dumps(
+            payload,
+        ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+def _format_sse_event(
+        *,
+        event: str,
+        data: Any,
+        event_id: int,
+) -> str:
+    payload = {
+        "event": event,
+        "data": data,
+    }
+
+    return (
+        f"id: {event_id}\n"
+        f"event: {event}\n"
+        "data: "
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+        + "\n\n"
+    )
+
+
+async def _iter_chat_events(
+        *,
+        user_input: str,
+        history: list[Any],
+        thread_id: str,
+        config: dict[str,Any]
+) -> AsyncIterator[dict[str,Any]]:
+    yield {
+        "type": "status",
+        "data": {
+            "text": "开始处理请求...",
+            "thread_id": thread_id,
+        },
+    }
+
+    emitted_completion: str | None = None
+
+    try:
+        async for runtime_event in (
+            chat_runtime.astream_runtime_events(
+                user_input,
+                messages=history,
+                config=config,
+            )
+        ):
+            if not isinstance(runtime_event,RuntimeEvent):
+                runtime_event = RuntimeEvent.from_raw(
+                    runtime_event
+                )
+
+            for payload in _runtime_event_to_legacy_events(
+                runtime_event
+            ):
+                if payload["type"] == "completion":
+                    content = str(
+                        payload["data"].get(
+                            "content",
+                            ""
+                        )
+                    )
+
+                    if (
+                        content
+                        and content == emitted_completion
+                    ):
+                        continue
+
+                    emitted_completion = content
+
+                yield payload
+
+        yield {
+            "type": "done",
+            "data": {
+                "thread_id": thread_id,
+            },
+        }
+
+    except asyncio.CancelledError:
+        yield {
+            "type": "cancelled",
+            "data": {
+                "thread_id": thread_id,
+                "message": "任务已取消",
+            },
+        }
+
+    except Exception as exc:
+        yield {
+            "type": "data",
+            "data": {
+                "thread_id": thread_id,
+                "message": str(exc),
+            },
+        }
+
+
+async def _iter_legacy_chat_stream(
+        **kwargs: Any
+) -> AsyncIterator[str]:
+    async for payload in _iter_chat_events(**kwargs):
+        yield _format_legacy_event(payload)
+
+
+async def _iter_sse_chat_stream(
+        **kwargs: Any
+) -> AsyncIterator[str]:
+    yield "retry: 2000\n\n"
+
+    event_id = 0
+
+    async for payload in _iter_chat_events(**kwargs):
+        event_id += 1
+
+        yield _format_sse_event(
+            event=payload["type"],
+            data=payload["data"],
+            event_id=event_id,
+        )
+
+
+@app.post(
+    "/api/chat",
+    response_model=None,
+)
+async def chat(
+        payload: ChatRequest,
+) -> ChatResponse | StreamingResponse:
+    last_index,user_input = _get_last_user_message(
+        payload.messages
+    )
+
+    history = _to_runtime_message(
+        payload.messages[:last_index]
+    )
+
+    thread_id = f"thread_{uuid.uuid4().hex}"
+    model = (
+        payload.model
+        or settings.primary_model
+    ).strip()
+    agent_id = (
+        payload.agent_id
+        or "default"
+    ).strip()
+    user_id = (
+        payload.user_id
+        or "anonymous"
+    ).strip()
+
+    search_mode = _normalize_search_mode(
+        payload.search_mode
+    )
+
+    config = _build_chat_config(
+        thread_id=thread_id,
+        model=model,
+        search_mode=search_mode,
+        agent_id=agent_id,
+        user_id=user_id,
+        images=payload.images,
+    )
+
+    if payload.stream:
+        return StreamingResponse(
+            _iter_legacy_chat_stream(
+                user_input=user_input,
+                history=history,
+                thread_id=thread_id,
+                config=config,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "X-Thread-ID": thread_id,
+            },
+        )
+
+    try:
+        result = await chat_runtime.ainvoke(
+            user_input,
+            messages=history,
+            config=config,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    final_report = str(
+        result.get("final_report","")
+        if isinstance(result,Mapping)
+        else ""
+    ).strip()
+
+    if not final_report:
+        final_report = "没有生成回复。"
+
+    return ChatResponse(
+        id=f"msg_{uuid.uuid4().hex}",
+        content=final_report,
+        timestamp=datetime.now(
+            timezone.utc
+        ).isoformat(),
+    )
+
+
+@app.post("/api/chat/sse")
+async def chat_sse(
+        payload: ChatRequest,
+) -> StreamingResponse:
+    last_index,user_input = _get_last_user_message(
+        payload.messages
+    )
+
+    history = _to_runtime_message(
+        payload.messages[:last_index]
+    )
+
+    thread_id = f"thread_{uuid.uuid4().hex}"
+    model = (
+        payload.model
+        or settings.primary_model
+    ).strip()
+    agent_id = (
+        payload.agent_id
+        or "default"
+    ).strip()
+    user_id = (
+        payload.user_id
+        or "anonymous"
+    ).strip()
+    search_mode = _normalize_search_mode(
+        payload.search_mode
+    )
+    config = _build_chat_config(
+        thread_id=thread_id,
+        model=model,
+        search_mode=search_mode,
+        agent_id=agent_id,
+        user_id=user_id,
+        images=payload.images,
+    )
+
+    return StreamingResponse(
+        _iter_sse_chat_stream(
+            user_input=user_input,
+            history=history,
+            thread_id=thread_id,
+            config=config,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-Thread-ID": thread_id,
+        },
     )
