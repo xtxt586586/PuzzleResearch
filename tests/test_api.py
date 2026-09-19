@@ -61,7 +61,15 @@ class PublicApiTests(unittest.TestCase):
 
         payload = response.json()
 
-        self.assertEqual(payload["agents_count"], 0)
+        self.assertEqual(
+            payload["agents_count"],
+            1,
+        )
+
+        self.assertEqual(
+            payload["agent_ids"],
+            ["default"],
+        )
         self.assertGreaterEqual(
             payload["tool_registry_total_tools"],
             1,

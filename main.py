@@ -16,13 +16,18 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
 )
-from pydantic import BaseModel, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+)
 
 from agent.core.events import RuntimeEvent
 from agent.core.runtime import AgentRuntime
 from common.config import settings
 from tools.builtin import create_default_registry
 from tools.search import SearchManager
+from common import agent_store
 
 
 APP_STARTED_AT = monotonic()
@@ -108,6 +113,64 @@ class ImagePayload(BaseModel):
 
 class CancelRequest(BaseModel):
     reason: str = "用户取消"
+
+
+
+class AgentUpsertRequest(BaseModel):
+    id: str | None = None
+    name: str
+    description: str = ""
+    system_prompt: str = ""
+    model: str = ""
+    enabled_tools: dict[str,bool] = Field(
+        default_factory=dict
+    )
+    mcp_servers: dict[str,Any] | None = None
+    metadata: dict[str,Any] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("id")
+    @classmethod
+    def _normalize_id(
+            cls,
+            value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_name(
+            cls,
+            value: str,
+    ) -> str:
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError("名称不能为空。")
+
+        return normalized
+
+
+class AgentRecordResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    system_prompt: str
+    model: str
+    enabled_tools: dict[str,bool]
+    mcp_servers: dict[str,Any] | None
+    metadata: dict[str,Any]
+    created_at: str
+    updated_at: str
+
+
+class AgentListsResponse(BaseModel):
+    agents: list[AgentRecordResponse]
 
 
 def _normalize_search_mode(
@@ -339,6 +402,51 @@ def _model_options() -> list[str]:
     return options
 
 
+def _agent_response(
+        record: agent_store.AgentRecord,
+) -> AgentRecordResponse:
+    return AgentRecordResponse.model_validate(
+        record.model_dump(mode="json")
+    )
+
+
+def _record_from_request(
+        payload: AgentUpsertRequest,
+        *,
+        agent_id: str
+) -> agent_store.AgentRecord:
+    timestamp = _timestamp()
+
+    return agent_store.AgentRecord(
+        id=agent_id,
+        name=payload.name,
+        description=payload.description,
+        system_prompt=payload.system_prompt,
+        model=payload.model,
+        enabled_tools=dict(
+            payload.enabled_tools
+        ),
+        mcp_servers=(
+            dict(payload.mcp_servers)
+            if payload.mcp_servers is not None
+            else None
+        ),
+        metadata=dict(payload.metadata),
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+
+def _raise_agent_store_error(
+        error: agent_store.AgentStoreError,
+) -> None:
+    raise HTTPException(
+        status_code=500,
+        detail=str(error),
+    ) from error
+
+
 @app.get("/")
 async def root() -> dict[str,Any]:
     return {
@@ -377,9 +485,18 @@ async def agent_health() -> AgentHealthResponse:
     except Exception:
         available_providers = []
 
+    try:
+        records = agent_store.list_agents()
+    except agent_store.AgentStoreError as exc:
+        _raise_agent_store_error(exc)
+
+
     return AgentHealthResponse(
-        agents_count=0,
-        agent_ids=[],
+        agents_count=len(records),
+        agent_ids=[
+            record.id
+            for record in records
+        ],
         tool_registry_total_tools=len(
             registry.list_tools()
         ),
@@ -440,6 +557,202 @@ async def public_config() -> PublicConfigResponse:
             options=_model_options(),
         ),
     )
+
+
+@app.get(
+    "/api/agents",
+    response_model=AgentListsResponse,
+)
+async def list_agents_api() -> AgentListsResponse:
+    try:
+        records = agent_store.list_agents()
+
+    except agent_store.AgentStoreError as exc:
+        _raise_agent_store_error(exc)
+
+    return AgentListsResponse(
+        agents=[
+            _agent_response(record)
+            for record in records
+        ]
+    )
+
+
+@app.get(
+    "/api/agents/{agent_id}",
+    response_model=AgentRecordResponse,
+)
+async def get_agent_api(
+        agent_id: str,
+) -> AgentRecordResponse:
+    try:
+        record = agent_store.get_agent(agent_id)
+
+    except agent_store.AgentStoreError as exc:
+        _raise_agent_store_error(exc)
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Agent 不存在。"
+        )
+
+    return _agent_response(record)
+
+@app.post(
+    "/api/agents",
+    response_model=AgentRecordResponse,
+    status_code=201,
+)
+async def create_agent_api(
+        payload: AgentUpsertRequest,
+) -> AgentRecordResponse:
+    agent_id = payload.id or (
+        f"agent_{uuid.uuid4().hex[:10]}"
+    )
+
+
+
+    record = _record_from_request(
+        payload,
+        agent_id=agent_id,
+    )
+
+    try:
+        created = agent_store.create_agent(
+            record
+        )
+
+    except agent_store.AgentAlreadyExistError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    except agent_store.AgentStoreError as exc:
+        _raise_agent_store_error(exc)
+
+    return _agent_response(created)
+
+
+@app.put(
+    "/api/agents/{agent_id}",
+    response_model=AgentRecordResponse,
+)
+async def update_agent_api(
+        agent_id: str,
+        payload: AgentUpsertRequest,
+) -> AgentRecordResponse:
+    normalized_id = agent_id.strip()
+
+    if normalized_id == agent_store.DEFAULT_AGENT_ID:
+        raise HTTPException(
+            status_code=403,
+            detail="默认 Agent 不允许更新。"
+        )
+
+    if (
+        payload.id is not None
+        and payload.id != normalized_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="请求体中的 id 必须与路径参数一致。"
+        )
+
+    try:
+        current = agent_store.get_agent(
+            normalized_id
+        )
+
+    except agent_store.AgentStoreError as exc:
+        _raise_agent_store_error(exc)
+
+    if current is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Agent 不存在。"
+        )
+
+    updated_record = current.model_copy(
+        update={
+            "name": payload.name,
+            "description": payload.description,
+            "system_prompt": payload.system_prompt,
+            "model": payload.model,
+            "enabled_tools": dict(
+                payload.enabled_tools
+            ),
+            "mcp_servers": (
+                dict(payload.mcp_servers)
+                if payload.mcp_servers is not None
+                else None
+            ),
+            "metadata": dict(payload.metadata),
+            "updated_at": _timestamp(),
+        }
+    )
+
+    try:
+        updated = agent_store.update_agent(
+            normalized_id,
+            updated_record,
+        )
+
+    except agent_store.AgentNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Agent 不存在。"
+        ) from exc
+
+    except agent_store.DefaultAgentProtectedError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
+    except agent_store.AgentStoreError as exc:
+        _raise_agent_store_error(exc)
+
+    return _agent_response(updated)
+
+
+
+@app.delete(
+    "/api/agents/{agent_id}"
+)
+async def delete_agent_api(
+        agent_id: str,
+) -> dict[str,str]:
+    normalized_id = agent_id.strip()
+
+    try:
+        agent_store.delete_agent(
+            normalized_id
+        )
+
+    except agent_store.DefaultAgentProtectedError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
+    except agent_store.AgentNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Agent 不存在。"
+        ) from exc
+
+    except agent_store.AgentStoreError as exc:
+        _raise_agent_store_error(exc)
+
+    return {
+        "status": "deleted",
+        "id": normalized_id,
+    }
+
+
+
 
 
 def _runtime_event_to_legacy_events(
