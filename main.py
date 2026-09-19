@@ -596,7 +596,7 @@ def _format_sse_event(
         event_id: int,
 ) -> str:
     payload = {
-        "event": event,
+        "type": event,
         "data": data,
     }
 
@@ -681,7 +681,7 @@ async def _iter_chat_events(
 
     except Exception as exc:
         yield {
-            "type": "data",
+            "type": "error",
             "data": {
                 "thread_id": thread_id,
                 "message": str(exc),

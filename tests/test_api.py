@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
 
 import main
+import json
 from agent.core.events import RuntimeEvent
 from main import app
 
@@ -257,6 +258,79 @@ class PublicApiTests(unittest.TestCase):
             response.headers["x-thread-id"].startswith(
                 "thread_"
             )
+        )
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+
+        completion_frame = next(
+            frame
+            for frame in frames
+            if frame.get("type") == "completion"
+        )
+
+        self.assertEqual(
+            completion_frame["data"]["content"],
+            "SSE 回答",
+        )
+
+        self.assertTrue(
+            any(
+                frame.get("type") == "done"
+                for frame in frames
+            )
+        )
+
+    def test_chat_sse_uses_error_event_on_runtime_failure(self):
+        async def failing_events(*args, **kwargs):
+            if False:
+                yield RuntimeEvent(
+                    event="unused",
+                    data={},
+                )
+
+            raise RuntimeError("测试流错误")
+
+        with patch.object(
+            main.chat_runtime,
+            "astream_runtime_events",
+            new=failing_events,
+        ):
+            response = self.client.post(
+                "/api/chat/sse",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "触发错误",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "event: error",
+            response.text,
+        )
+
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+
+        error_frame = next(
+            frame
+            for frame in frames
+            if frame.get("type") == "error"
+        )
+
+        self.assertEqual(
+            error_frame["data"]["message"],
+            "测试流错误",
         )
 
 
