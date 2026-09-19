@@ -36,6 +36,8 @@ app = FastAPI(
 
 chat_runtime = AgentRuntime()
 
+_active_chat_tasks: dict[str,asyncio.Task] = {}
+
 
 class AgentHealthResponse(BaseModel):
     agents_count: int
@@ -102,6 +104,10 @@ class ImagePayload(BaseModel):
     name: str | None = None
     data: str
     mime: str| None = None
+
+
+class CancelRequest(BaseModel):
+    reason: str = "用户取消"
 
 
 def _normalize_search_mode(
@@ -619,17 +625,22 @@ async def _iter_chat_events(
         thread_id: str,
         config: dict[str,Any]
 ) -> AsyncIterator[dict[str,Any]]:
-    yield {
-        "type": "status",
-        "data": {
-            "text": "开始处理请求...",
-            "thread_id": thread_id,
-        },
-    }
+    current_task = asyncio.current_task()
+
+    if current_task is not None:
+        _active_chat_tasks[thread_id] = current_task
 
     emitted_completion: str | None = None
 
     try:
+        yield {
+            "type": "status",
+            "data": {
+                "text": "开始处理请求...",
+                "thread_id": thread_id,
+            },
+        }
+
         async for runtime_event in (
             chat_runtime.astream_runtime_events(
                 user_input,
@@ -688,6 +699,17 @@ async def _iter_chat_events(
             },
         }
 
+    finally:
+        if (
+            current_task is not None
+            and _active_chat_tasks.get(thread_id)
+            is current_task
+        ):
+            _active_chat_tasks.pop(
+                thread_id,
+                None,
+            )
+
 
 async def _iter_legacy_chat_stream(
         **kwargs: Any
@@ -711,6 +733,60 @@ async def _iter_sse_chat_stream(
             data=payload["data"],
             event_id=event_id,
         )
+
+
+@app.post("/api/chat/cancel/{thread_id}")
+async def cancel_chat(
+        thread_id: str,
+        payload: CancelRequest | None = None,
+) -> dict[str,Any]:
+    reason = (
+        payload.reason
+        if payload is not None
+        else "用户取消"
+    )
+
+    task = _active_chat_tasks.pop(
+        thread_id,
+        None,
+    )
+
+    if task is None or task.done():
+        return {
+            "status": "not_found",
+            "thread_id": thread_id,
+            "message": "任务已取消或不存在",
+        }
+
+    task.cancel()
+
+    return {
+        "status": "cancelled",
+        "thread_id": thread_id,
+        "reason": reason,
+        "time_stamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/chat/cancel-all")
+async def cancel_all_chats() -> dict[str,Any]:
+    active_tasks = list(
+        _active_chat_tasks.items()
+    )
+
+    _active_chat_tasks.clear()
+
+    for _, task in active_tasks:
+        if not task.done():
+            task.cancel()
+
+    return {
+        "status": "all_cancelled",
+        "cancelled_count": len(active_tasks),
+        "time_stamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 
 
 @app.post(

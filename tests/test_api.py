@@ -2,7 +2,11 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import (
+    AsyncMock,
+    MagicMock,
+    patch,
+)
 
 import main
 import json
@@ -332,6 +336,104 @@ class PublicApiTests(unittest.TestCase):
             error_frame["data"]["message"],
             "测试流错误",
         )
+
+
+    def test_cancel_chat_cancels_active_task(self):
+        task = MagicMock()
+        task.done.return_value = False
+
+        main._active_chat_tasks[
+            "thread-cancel-001"
+        ] = task
+
+        try:
+            response = self.client.post(
+                "/api/chat/cancel/thread-cancel-001",
+                json={
+                    "reason": "用户停止任务",
+                },
+            )
+        finally:
+            main._active_chat_tasks.clear()
+
+        self.assertEqual(
+            response.status_code,
+            200,
+        )
+
+        payload = response.json()
+
+        self.assertEqual(
+            payload["status"],
+            "cancelled",
+        )
+        self.assertEqual(
+            payload["thread_id"],
+            "thread-cancel-001",
+        )
+        self.assertEqual(
+            payload["reason"],
+            "用户停止任务",
+        )
+
+        task.cancel.assert_called_once()
+
+
+    def test_cancel_chat_returns_not_found_for_finished_task(self):
+        response = self.client.post(
+            "/api/chat/cancel/not-found-thread",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            200,
+        )
+
+        self.assertEqual(
+            response.json()["status"],
+            "not_found",
+        )
+
+
+    def test_cancel_all_chats_cancels_active_tasks(self):
+        first_task = MagicMock()
+        first_task.done.return_value = False
+
+        second_task = MagicMock()
+        second_task.done.return_value = False
+
+        main._active_chat_tasks.update(
+            {
+                "thread-cancel-001": first_task,
+                "thread-cancel-002": second_task,
+            }
+        )
+
+        try:
+            response = self.client.post(
+                "/api/chat/cancel-all",
+            )
+        finally:
+            main._active_chat_tasks.clear()
+
+        self.assertEqual(
+            response.status_code,
+            200,
+        )
+
+        payload = response.json()
+
+        self.assertEqual(
+            payload["status"],
+            "all_cancelled",
+        )
+        self.assertEqual(
+            payload["cancelled_count"],
+            2,
+        )
+
+        first_task.cancel.assert_called_once()
+        second_task.cancel.assert_called_once()
 
 
 if __name__ == "__main__":
