@@ -22,7 +22,7 @@ class SessionManager:
             runtime: AgentRuntime,
             checkpointer: Any,
     ) -> None:
-        self.runtime = runtime,
+        self.runtime = runtime
         self.checkpointer = checkpointer
 
     @staticmethod
@@ -145,7 +145,7 @@ class SessionManager:
         for checkpoint in self.checkpointer.list(None,limit = limit *5):
             config = getattr(checkpoint,"config",{}) or {}
             configurable = config.get("configurable",{})
-            thread_id = str(configurable.get("thread_if","")).strip()
+            thread_id = str(configurable.get("thread_id","")).strip()
 
             if not thread_id or thread_id in seen:
                 continue
@@ -203,11 +203,20 @@ class SessionManager:
             snapshot,
         )
 
-        configurable = getattr(
+        snapshot_config = getattr(
             snapshot,
             "config",
             {},
         ) or {}
+
+        if isinstance(snapshot_config,Mapping):
+            configurable = snapshot_config.get(
+                "configurable",
+                snapshot_config,
+            ) or {}
+
+        else:
+            configurable = {}
 
         return {
             "thread_id": thread_id,
