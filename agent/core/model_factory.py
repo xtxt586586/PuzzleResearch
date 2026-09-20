@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Literal
+from collections.abc import Mapping
+from typing import Any
 
 from langchain_openai import ChatOpenAI
 
@@ -130,6 +132,7 @@ class ModelFactory:
             *,
             temperature: float | None = None,
             timeout: int | None = None,
+            config: Mapping[str, Any] | None = None,
     ) -> ChatOpenAI:
         """
         创建指定任务使用的模型。
@@ -140,7 +143,10 @@ class ModelFactory:
         ModelFactory.for_task("writing")
         ModelFactory.for_task("evaluation")
         """
-        model_name = cls.model_name_for_task(task)
+        model_name = (
+            cls._configured_model(config)
+            or cls.model_name_for_task(task)
+        )
 
         if temperature is None:
             if task in {"routing","evaluation","critic"}:
@@ -157,3 +163,38 @@ class ModelFactory:
             temperature=temperature,
             timeout=timeout,
         )
+
+
+    @classmethod
+    def _configured_model(
+            cls,
+            config: Mapping[str, Any] | None,
+    ) -> str | None:
+        if not isinstance(config,Mapping):
+            return None
+
+        configurable = config.get(
+            "configurable",
+            {},
+        )
+
+        if not isinstance(configurable,Mapping):
+            return None
+
+        candidates = [
+            configurable.get("model_override"),
+            getattr(
+                configurable.get("agent_profile"),
+                "model",
+                None,
+            ),
+        ]
+
+        for candidate in candidates:
+            if isinstance(candidate,str):
+                normalized = candidate.strip()
+
+                if normalized:
+                    return normalized
+
+        return None

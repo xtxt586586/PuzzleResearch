@@ -367,6 +367,7 @@ def _build_chat_config(
         user_id: str,
         images: list[ImagePayload] | None,
         agent_profile: AgentProfile,
+        model_override: str | None,
 ) -> dict[str,Any]:
     return {
         "configurable": {
@@ -380,6 +381,7 @@ def _build_chat_config(
                 for image in images or []
             ],
             "agent_profile": agent_profile,
+            "model_override": model_override,
         },
         "recursion_limit": 50,
     }
@@ -1177,9 +1179,19 @@ async def chat(
     agent_record,agent_profile = (
         _resolve_agent_runtime(agent_id)
     )
+    requested_model = (
+        payload.model.strip()
+        if payload.model
+        else ""
+    )
+    agent_model = agent_record.model.strip()
+    model_override = (
+        requested_model
+        or agent_model
+        or None
+    )
     model = (
-            payload.model
-            or agent_record.model
+            model_override
             or settings.primary_model
     ).strip()
     user_id = (
@@ -1199,6 +1211,7 @@ async def chat(
         user_id=user_id,
         images=payload.images,
         agent_profile=agent_profile,
+        model_override=model_override,
     )
 
     if payload.stream:
@@ -1269,9 +1282,19 @@ async def chat_sse(
     agent_record,agent_profile = (
         _resolve_agent_runtime(agent_id)
     )
+    requested_model = (
+        payload.model.strip()
+        if payload.model
+        else ""
+    )
+    agent_model = agent_record.model.strip()
+    model_override = (
+        requested_model
+        or agent_model
+        or None
+    )
     model = (
-            payload.model
-            or agent_record.model
+            model_override
             or settings.primary_model
     ).strip()
     user_id = (
@@ -1289,6 +1312,7 @@ async def chat_sse(
         user_id=user_id,
         images=payload.images,
         agent_profile=agent_profile,
+        model_override=model_override,
     )
 
     return StreamingResponse(

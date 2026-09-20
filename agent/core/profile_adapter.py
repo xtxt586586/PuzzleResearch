@@ -81,6 +81,8 @@ def runtime_profile_from_record(
 
     return AgentProfile(
         name=record.name,
+        system_prompt=record.system_prompt.strip(),
+        model=record.model.strip() or None,
         enabled_tools=enabled_tools,
         blocked_tools=blocked_tools,
         tool_call_limit=policy.get(

@@ -259,6 +259,7 @@ class SmartRouter:
             llm = ModelFactory.for_task(
                 "routing",
                 temperature=0.0,
+                config=config,
             )
 
             messages = [

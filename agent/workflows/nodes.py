@@ -319,6 +319,7 @@ def web_plan_node(
         llm = ModelFactory.for_task(
             "planning",
             temperature=0.2,
+            config=config,
         )
 
         messages = [
@@ -342,6 +343,11 @@ def web_plan_node(
                 content=f"用户问题：\n{user_input}"
             ),
         ]
+
+        messages = _apply_agent_system_prompt(
+            messages,
+            config,
+        )
 
         try:
             response = llm.invoke(
@@ -423,6 +429,7 @@ def deep_plan_node(
         llm = ModelFactory.for_task(
             "planning",
             temperature=0.2,
+            config=config,
         )
 
         messages = [
@@ -448,6 +455,11 @@ def deep_plan_node(
                 content=f"用户问题：\n{user_input}"
             ),
         ]
+
+        messages = _apply_agent_system_prompt(
+            messages,
+            config,
+        )
 
         try:
             response = llm.invoke(
@@ -566,6 +578,7 @@ def deep_followup_plan_node(
     llm = ModelFactory.for_task(
         "planning",
         temperature=0.2,
+        config=config,
     )
 
     messages = [
@@ -594,6 +607,11 @@ def deep_followup_plan_node(
             )
         ),
     ]
+
+    messages = _apply_agent_system_prompt(
+        messages,
+        config,
+    )
 
     candidates: list[str] = []
     reasoning = ""
@@ -805,6 +823,7 @@ def writer_node(
     llm = ModelFactory.for_task(
         "writing",
         temperature=0.4,
+        config=config,
     )
 
     messages = [
@@ -825,6 +844,11 @@ def writer_node(
             )
         ),
     ]
+
+    messages = _apply_agent_system_prompt(
+        messages,
+        config,
+    )
 
     response = llm.invoke(
         messages,
@@ -910,6 +934,7 @@ def deep_writer_node(
     llm = ModelFactory.for_task(
         "writing",
         temperature=0.3,
+        config=config,
     )
 
     messages = [
@@ -933,6 +958,11 @@ def deep_writer_node(
             )
         ),
     ]
+
+    messages = _apply_agent_system_prompt(
+        messages,
+        config,
+    )
 
     response = llm.invoke(
         messages,
@@ -1027,6 +1057,7 @@ def evaluator_node(
     llm = ModelFactory.for_task(
         "evaluation",
         temperature=0.0,
+        config=config,
     )
 
     messages = [
@@ -1063,6 +1094,11 @@ def evaluator_node(
             )
         ),
     ]
+
+    messages = _apply_agent_system_prompt(
+        messages,
+        config,
+    )
 
     try:
         response = llm.invoke(
@@ -1237,6 +1273,7 @@ def revise_node(
     llm = ModelFactory.for_task(
         "writing",
         temperature=0.3,
+        config=config,
     )
 
     messages = [
@@ -1263,6 +1300,11 @@ def revise_node(
             )
         ),
     ]
+
+    messages = _apply_agent_system_prompt(
+        messages,
+        config,
+    )
 
     response = llm.invoke(
         messages,
@@ -1335,6 +1377,7 @@ def clarify_node(
     llm = ModelFactory.for_task(
         "clarification",
         temperature=0.0,
+        config=config,
     )
 
     messages = [
@@ -1351,6 +1394,11 @@ def clarify_node(
             content=f"用户原始提问：\n{user_input}"
         ),
     ]
+
+    messages = _apply_agent_system_prompt(
+        messages,
+        config,
+    )
 
     try:
         response = llm.invoke(
@@ -1409,6 +1457,35 @@ def _get_agent_profile(
         )
 
     return profile
+
+
+def _apply_agent_system_prompt(
+        messages: list[Any],
+        config: RunnableConfig,
+) -> list[Any]:
+    """
+    应用当前 Agent 的系统提示。
+    """
+    profile = _get_agent_profile(config)
+
+    if profile is None:
+        return messages
+
+    system_prompt = profile.system_prompt.strip()
+
+    if not system_prompt:
+        return messages
+
+    return [
+        SystemMessage(
+            content=(
+                "Agent Profile 系统提示：\n"
+                + system_prompt
+            )
+        ),
+        *messages,
+    ]
+
 
 
 
@@ -1818,10 +1895,16 @@ def agent_plan_node(
         ),
     ]
 
+    planner_messages = _apply_agent_system_prompt(
+        planner_messages,
+        config,
+    )
+
     try:
         llm = ModelFactory.for_task(
             "planning",
             temperature=0.0,
+            config=config,
         )
 
         response = llm.invoke(
@@ -2454,6 +2537,7 @@ def direct_answer_node(
     llm = ModelFactory.for_task(
         "writing",
         temperature=0.7,
+        config=config,
     )
 
     messages = [
@@ -2466,6 +2550,11 @@ def direct_answer_node(
         ),
         HumanMessage(content=user_input),
     ]
+
+    messages = _apply_agent_system_prompt(
+        messages,
+        config,
+    )
 
     response = llm.invoke(
         messages,

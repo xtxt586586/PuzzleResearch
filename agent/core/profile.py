@@ -14,6 +14,10 @@ class AgentProfile:
 
     name: str = "default"
 
+    system_prompt: str = ""
+
+    model: str | None = None
+
     enabled_tools: frozenset[str] | None = None
 
     blocked_tools: frozenset[str] | None = None

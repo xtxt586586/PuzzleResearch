@@ -37,6 +37,7 @@ class AgentProfileApiTests(unittest.TestCase):
                 "id": "restricted-agent",
                 "name": "Restricted Agent",
                 "model": "deepseek-reasoner",
+                "system_prompt": "必须使用严谨中文回答。",
                 "enabled_tools": {
                     "python_executor": True,
                     "echo": False,
@@ -98,6 +99,10 @@ class AgentProfileApiTests(unittest.TestCase):
             "Restricted Agent",
         )
         self.assertEqual(
+            profile.system_prompt,
+            "必须使用严谨中文回答。",
+        )
+        self.assertEqual(
             profile.enabled_tools,
             frozenset({"python_executor"}),
         )
@@ -119,6 +124,10 @@ class AgentProfileApiTests(unittest.TestCase):
 
         self.assertEqual(
             runtime_config["configurable"]["model"],
+            "deepseek-reasoner",
+        )
+        self.assertEqual(
+            runtime_config["configurable"]["model_override"],
             "deepseek-reasoner",
         )
 

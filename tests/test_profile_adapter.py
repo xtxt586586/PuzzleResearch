@@ -105,6 +105,25 @@ class ProfileAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runtime_profile_from_record(record)
 
+    def test_agent_fields_are_mapped(self):
+        record = AgentRecord(
+            id="custom-agent",
+            name="Custom Agent",
+            system_prompt="你是一个严谨的研究助手。",
+            model="deepseek-reasoner",
+        )
+
+        profile = runtime_profile_from_record(record)
+
+        self.assertEqual(
+            profile.system_prompt,
+            "你是一个严谨的研究助手。",
+        )
+        self.assertEqual(
+            profile.model,
+            "deepseek-reasoner",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
