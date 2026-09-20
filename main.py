@@ -28,6 +28,10 @@ from common.config import settings
 from tools.builtin import create_default_registry
 from tools.search import SearchManager
 from common import agent_store
+from agent.core.profile import AgentProfile
+from agent.core.profile_adapter import (
+    runtime_profile_from_record,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -362,6 +366,7 @@ def _build_chat_config(
         agent_id: str,
         user_id: str,
         images: list[ImagePayload] | None,
+        agent_profile: AgentProfile,
 ) -> dict[str,Any]:
     return {
         "configurable": {
@@ -374,6 +379,7 @@ def _build_chat_config(
                 image.model_dump(mode="json")
                 for image in images or []
             ],
+            "agent_profile": agent_profile,
         },
         "recursion_limit": 50,
     }
@@ -400,6 +406,51 @@ def _model_options() -> list[str]:
             options.append(model_name)
 
     return options
+
+
+
+def _resolve_agent_runtime(
+        agent_id: str,
+) -> tuple[
+    agent_store.AgentRecord,
+    AgentProfile,
+]:
+    normalized_id = agent_id.strip()
+
+    if not normalized_id:
+        normalized_id = "default"
+
+    try:
+        record = agent_store.get_agent(normalized_id)
+
+    except agent_store.AgentStoreError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent 不存在：{normalized_id}",
+        )
+
+    try:
+        profile = runtime_profile_from_record(
+            record
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(
+            status_code=442,
+            detail=str(exc),
+        ) from exc
+
+    return record,profile
+
 
 
 def _agent_response(
@@ -1118,13 +1169,18 @@ async def chat(
     )
 
     thread_id = f"thread_{uuid.uuid4().hex}"
-    model = (
-        payload.model
-        or settings.primary_model
-    ).strip()
+
     agent_id = (
         payload.agent_id
         or "default"
+    ).strip()
+    agent_record,agent_profile = (
+        _resolve_agent_runtime(agent_id)
+    )
+    model = (
+            payload.model
+            or agent_record.model
+            or settings.primary_model
     ).strip()
     user_id = (
         payload.user_id
@@ -1142,6 +1198,7 @@ async def chat(
         agent_id=agent_id,
         user_id=user_id,
         images=payload.images,
+        agent_profile=agent_profile,
     )
 
     if payload.stream:
@@ -1204,13 +1261,18 @@ async def chat_sse(
     )
 
     thread_id = f"thread_{uuid.uuid4().hex}"
-    model = (
-        payload.model
-        or settings.primary_model
-    ).strip()
+
     agent_id = (
         payload.agent_id
         or "default"
+    ).strip()
+    agent_record,agent_profile = (
+        _resolve_agent_runtime(agent_id)
+    )
+    model = (
+            payload.model
+            or agent_record.model
+            or settings.primary_model
     ).strip()
     user_id = (
         payload.user_id
@@ -1226,6 +1288,7 @@ async def chat_sse(
         agent_id=agent_id,
         user_id=user_id,
         images=payload.images,
+        agent_profile=agent_profile,
     )
 
     return StreamingResponse(
