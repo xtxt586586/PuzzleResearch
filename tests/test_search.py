@@ -75,6 +75,80 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(provider.calls, [("deep query", 2)])
         self.assertEqual(len(result["search_results"]), 1)
 
+    def test_manager_reuses_cached_result(self):
+        provider = FakeProvider(
+            "fake",
+            results=[
+                {
+                    "title": "Cached",
+                    "url": "https://example.com",
+                    "snippet": "snippet",
+                    "content": "content",
+                    "provider": "fake",
+                }
+            ],
+        )
+
+        manager = SearchManager(
+            {"fake": provider}
+        )
+
+        with patch.object(
+                settings,
+                "search_engines",
+                "fake",
+        ):
+            first = manager.search("same query", 3)
+            second = manager.search("same query", 3)
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            provider.calls,
+            [("same query", 3)],
+        )
+
+        stats = manager.cache_stats()
+
+        self.assertEqual(stats["entries"], 1)
+        self.assertEqual(stats["hits"], 1)
+        self.assertEqual(stats["misses"], 1)
+        self.assertEqual(stats["hit_rate"], 0.5)
+
+    def test_clear_cache_forces_provider_call(self):
+        provider = FakeProvider(
+            "fake",
+            results=[
+                {
+                    "title": "Result",
+                    "url": "https://example.com",
+                    "snippet": "snippet",
+                    "content": "content",
+                    "provider": "fake",
+                }
+            ],
+        )
+
+        manager = SearchManager(
+            {"fake": provider}
+        )
+
+        with patch.object(
+                settings,
+                "search_engines",
+                "fake",
+        ):
+            manager.search("query", 2)
+            self.assertEqual(manager.clear_cache(), 1)
+            manager.search("query", 2)
+
+        self.assertEqual(
+            provider.calls,
+            [
+                ("query", 2),
+                ("query", 2),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

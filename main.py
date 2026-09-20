@@ -26,7 +26,10 @@ from agent.core.events import RuntimeEvent
 from agent.core.runtime import AgentRuntime
 from common.config import settings
 from tools.builtin import create_default_registry
-from tools.search import SearchManager
+from tools.search import (
+    SearchManager,
+    get_default_search_runtime_state,
+)
 from common import agent_store
 from agent.core.profile import AgentProfile
 from agent.core.profile_adapter import (
@@ -154,6 +157,11 @@ class SearchProviderSnapshot(BaseModel):
     available: bool
     healthy: bool
     reason: str
+    calls: int = 0
+    successes: int = 0
+    failures: int = 0
+    empty_results: int = 0
+    last_error: str = ""
 
 
 class SearchProviderResponse(BaseModel):
@@ -281,6 +289,18 @@ class AgentRecordResponse(BaseModel):
 
 class AgentListsResponse(BaseModel):
     agents: list[AgentRecordResponse]
+
+
+
+class SearchCacheStateResponse(BaseModel):
+    entries: int
+    hits: int
+    misses: int
+    hit_rate: float
+
+
+class SearchCacheClearResponse(BaseModel):
+    cleared: int
 
 
 def _normalize_search_mode(
@@ -598,7 +618,15 @@ def _resolve_agent_runtime(
 def _search_provider_snapshots() -> list[
     dict[str,Any]
 ]:
-    manager = SearchManager()
+    manager = SearchManager(
+        runtime_state=get_default_search_runtime_state()
+    )
+    provider_stats_method = getattr(manager, "provider_call_stats", None)
+    provider_stats = (
+        provider_stats_method()
+        if callable(provider_stats_method)
+        else {}
+    )
     configured_name = set(
         settings.search_engines_list
     )
@@ -624,6 +652,12 @@ def _search_provider_snapshots() -> list[
             else:
                 reason = "Provider 不可用。"
 
+
+        stats = provider_stats.get(
+            provider_name,
+            {},
+        )
+
         snapshots.append(
             {
                 "name": provider_name,
@@ -631,6 +665,11 @@ def _search_provider_snapshots() -> list[
                 "available": available,
                 "healthy": available,
                 "reason": reason,
+                "calls": stats.get("calls", 0),
+                "successes": stats.get("successes", 0),
+                "failures": stats.get("failures", 0),
+                "empty_results": stats.get("empty_results", 0),
+                "last_error": stats.get("last_error", ""),
             }
         )
 
@@ -1837,3 +1876,31 @@ async def interrupt_resume_api(
             else str(result)
         ),
     }
+
+
+@app.get(
+    "/api/search/cache/stats",
+    response_model=SearchCacheStateResponse,
+)
+async def get_search_cache_stats_api():
+    manager = SearchManager(
+        runtime_state=get_default_search_runtime_state()
+    )
+
+    return SearchCacheStateResponse.model_validate(
+        manager.cache_stats(),
+    )
+
+
+@app.post(
+    "/api/search/cache/clear",
+    response_model=SearchCacheClearResponse,
+)
+async def clear_search_cache_api():
+    manager = SearchManager(
+        runtime_state=get_default_search_runtime_state()
+    )
+
+    return SearchCacheClearResponse(
+        cleared=manager.clear_cache(),
+    )

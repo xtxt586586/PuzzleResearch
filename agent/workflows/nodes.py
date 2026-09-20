@@ -15,7 +15,10 @@ from agent.core.state import AgentState,QueryState
 from agent.core.profile import AgentProfile
 from agent.core.smart_router import smart_route
 from common.config import settings
-from tools.search import SearchManager
+from tools.search import (
+    SearchManager,
+    get_default_search_runtime_state,
+)
 from tools.registry import ToolRegistry
 from tools.builtin import create_default_registry
 
@@ -718,7 +721,9 @@ def search_node(
 
     max_results = max(int(result_limit), 1)
 
-    manager = SearchManager()
+    manager = SearchManager(
+        runtime_state=get_default_search_runtime_state()
+    )
 
     try:
         results = manager.search(
