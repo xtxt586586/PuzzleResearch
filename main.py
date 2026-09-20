@@ -106,8 +106,6 @@ class InterruptResumeRequest(BaseModel):
 
 
 
-
-
 class AgentHealthResponse(BaseModel):
     agents_count: int
     agent_ids: list[str]
@@ -118,6 +116,54 @@ class AgentHealthResponse(BaseModel):
     search_strategy: str
     search_engines: list[str]
     search_providers_available: list[str]
+
+
+class ToolRegistryState(BaseModel):
+    total_tools: int
+    enabled_tools: int
+    deprecated_tools: int
+    total_calls: int
+    total_successes: int
+    overall_success_rate: float
+    most_used: list[dict[str,Any]]
+    by_type: dict[str,int]
+    tags: list[str]
+
+
+class ToolRegistryTool(BaseModel):
+    name: str
+    description: str
+    parameters: list[dict[str,Any]]
+    enabled: bool
+    source: str
+    tool_type: str
+
+class ToolRegistryResponse(BaseModel):
+    stats: ToolRegistryState
+    tools: list[ToolRegistryTool]
+
+
+class ToolRegistryRefreshResponse(BaseModel):
+    discovered: int
+    total_tools: int
+
+
+class SearchProviderSnapshot(BaseModel):
+    name: str
+    configured: bool
+    available: bool
+    healthy: bool
+    reason: str
+
+
+class SearchProviderResponse(BaseModel):
+    providers: list[SearchProviderSnapshot]
+
+
+class SearchProviderResetResponse(BaseModel):
+    reset: bool
+    message: str
+
 
 
 class PublicConfigDefaults(BaseModel):
@@ -470,6 +516,40 @@ def _model_options() -> list[str]:
     return options
 
 
+def _tool_registry_snapshot() -> dict[str,Any]:
+    registry = create_default_registry()
+    schemas = registry.describe_tools()
+
+    tools: list[dict[str,Any]] = []
+
+    for schema in schemas:
+        tools.append(
+            {
+                **schema,
+                "enabled": True,
+                "source": "builtin",
+                "tool_type": "builtin",
+            }
+        )
+
+    return {
+        "stats": {
+            "total_tools": len(tools),
+            "enabled_tools": len(tools),
+            "deprecated_tools": 0,
+            "total_calls": 0,
+            "total_successes": 0,
+            "overall_success_rate": 0.0,
+            "most_used": [],
+            "by_type": {
+                "builtin": len(tools),
+            },
+            "tags": [],
+        },
+        "tools": tools,
+    }
+
+
 
 def _resolve_agent_runtime(
         agent_id: str,
@@ -512,6 +592,49 @@ def _resolve_agent_runtime(
         ) from exc
 
     return record,profile
+
+
+
+def _search_provider_snapshots() -> list[
+    dict[str,Any]
+]:
+    manager = SearchManager()
+    configured_name = set(
+        settings.search_engines_list
+    )
+
+    snapshots: list[dict[str,Any]] = []
+
+    for name,provider in manager.providers.items():
+        provider_name = str(name).strip()
+
+        try:
+            available = bool(
+                provider.is_available()
+            )
+
+        except Exception as exc:
+            available = False
+            reason = str(exc)
+        else:
+            if available:
+                reason = ""
+            elif provider_name not in configured_name:
+                reason = "未在当前搜索配置中启用。"
+            else:
+                reason = "Provider 不可用。"
+
+        snapshots.append(
+            {
+                "name": provider_name,
+                "configured": provider_name in configured_name,
+                "available": available,
+                "healthy": available,
+                "reason": reason,
+            }
+        )
+
+    return snapshots
 
 
 
@@ -625,6 +748,58 @@ async def agent_health() -> AgentHealthResponse:
         search_providers_available=sorted(
             str(name)
             for name in available_providers
+        ),
+    )
+
+
+@app.get(
+    "/api/tools/registry",
+    response_model=ToolRegistryResponse,
+)
+async def get_tool_registry_api() -> ToolRegistryResponse:
+    return ToolRegistryResponse.model_validate(
+        _tool_registry_snapshot()
+    )
+
+@app.post(
+    "/api/tools/registry/refresh",
+    response_model=ToolRegistryRefreshResponse,
+)
+async def refresh_tool_registry_api(
+        reset: bool = False,
+) -> ToolRegistryRefreshResponse:
+    snapshot = _tool_registry_snapshot()
+
+    return ToolRegistryRefreshResponse(
+        discovered=0,
+        total_tools=snapshot["stats"]["total_tools"],
+    )
+
+
+@app.get(
+    "/api/search/providers",
+    response_model=SearchProviderResponse,
+)
+async def get_search_provider_api() -> SearchProviderResponse:
+    return SearchProviderResponse(
+        providers=[
+            SearchProviderSnapshot.model_validate(
+                item
+            )
+            for item in _search_provider_snapshots()
+        ]
+    )
+
+@app.post(
+    "/api/search/providers/reset",
+    response_model=SearchProviderResetResponse,
+)
+async def reset_search_provider_api() -> SearchProviderResetResponse:
+    return SearchProviderResetResponse(
+        reset=True,
+        message=(
+            "当前搜索管理器没有持久化 Provider 状态，"
+            "已完成逻辑重置。"
         ),
     )
 
