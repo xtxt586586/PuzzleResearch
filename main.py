@@ -32,6 +32,15 @@ from agent.core.profile import AgentProfile
 from agent.core.profile_adapter import (
     runtime_profile_from_record,
 )
+from langgraph.checkpoint.memory import (
+    InMemorySaver,
+)
+
+from common.session_manager import (
+    SessionManager,
+    SessionManagerError,
+    SessionNotFoundError,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -43,9 +52,60 @@ app = FastAPI(
 )
 
 
-chat_runtime = AgentRuntime()
+
+chat_checkpointer = InMemorySaver()
+
+chat_runtime = AgentRuntime(
+    checkpointer=chat_checkpointer,
+)
+
+session_manager = SessionManager(
+    chat_runtime,
+    chat_checkpointer,
+)
 
 _active_chat_tasks: dict[str,asyncio.Task] = {}
+
+
+
+class SessionSummaryResponse(BaseModel):
+    thread_id: str
+    status: str
+    topic: str
+    created_at: str
+    updated_at: str
+    route: str
+    has_report: bool
+    revision_count: int
+    message_count: int
+    agent_id: str
+    user_id: str
+
+
+class SessionListResponse(BaseModel):
+    count: int
+    sessions: list[SessionSummaryResponse]
+
+
+
+class SessionStateResponse(BaseModel):
+    thread_id: str
+    status: str
+    state: dict[str,Any]
+    interrupts: list[Any]
+    checkpoint_id: str | None = None
+
+
+class SessionResumeRequest(BaseModel):
+    resume_value: Any = True
+
+class InterruptResumeRequest(BaseModel):
+    approved: bool | None = None
+    resume_value: Any = None
+    action: str | None = None
+
+
+
 
 
 class AgentHealthResponse(BaseModel):
@@ -1154,6 +1214,178 @@ async def cancel_all_chats() -> dict[str,Any]:
 
 
 
+@app.get(
+    "/api/sessions",
+    response_model=SessionListResponse,
+)
+async def list_sessions_api(
+        limit: int = 50,
+        status: str | None = None,
+) -> SessionListResponse:
+    try:
+        sessions = session_manager.list_sessions(
+            limit=limit,
+            status=status,
+        )
+
+    except SessionManagerError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return SessionListResponse(
+        count=len(sessions),
+        sessions=[
+            SessionSummaryResponse.model_validate(
+                session
+            )
+            for session in sessions
+        ],
+    )
+
+
+@app.get(
+    "/api/sessions/{thread_id}",
+    response_model=SessionSummaryResponse
+)
+async def get_session_api(
+        thread_id: str,
+) -> SessionSummaryResponse:
+    try:
+        session = session_manager.get_session(
+            thread_id
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+
+    except SessionManagerError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return SessionSummaryResponse.model_validate(
+        session
+    )
+
+
+@app.get(
+    "/api/sessions/{thread_id}/state",
+    response_model=SessionStateResponse,
+)
+async def get_session_state_api(
+        thread_id: str,
+) -> SessionStateResponse:
+    try:
+        state = session_manager.get_state(
+            thread_id
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except (
+        SessionManagerError,
+        ValueError
+    ) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return SessionStateResponse.model_validate(
+        state
+    )
+
+@app.delete(
+    "/api/sessions/{thread_id}",
+)
+async def delete_session_api(
+        thread_id: str,
+) -> dict[str,str]:
+    try:
+        session_manager.delete_session(
+            thread_id
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except SessionManagerError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "status": "deleted",
+        "thread_id": thread_id,
+    }
+
+@app.post(
+    "/api/sessions/{thread_id}/resume"
+)
+async def resume_session_api(
+        thread_id: str,
+        payload: SessionResumeRequest,
+) -> dict[str,Any]:
+    resume_value = (
+        payload.resume_value
+        if payload is not None
+        else True
+    )
+
+    try:
+        session_manager.get_session(
+            thread_id
+        )
+
+        result = await chat_runtime.aresume(
+            resume_value,
+            thread_id=thread_id,
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "status": "resumed",
+        "thread_id": thread_id,
+        "result": (
+            dict(result)
+            if isinstance(result,Mapping)
+            else str(result)
+        ),
+    }
+
+
+
 
 @app.post(
     "/api/chat",
@@ -1330,3 +1562,103 @@ async def chat_sse(
             "X-Thread-ID": thread_id,
         },
     )
+
+
+@app.get(
+    "/api/interrupt/{thread_id}/status"
+)
+async def interrupt_status_api(
+        thread_id: str,
+) -> dict[str,Any]:
+    try:
+        state = session_manager.get_state(
+            thread_id
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    interrupts = state.get(
+        "interrupts", [],
+    )
+
+    return {
+        "thread_id": thread_id,
+        "is_interrupted": bool(interrupts),
+        "interrupts": interrupts,
+        "available_actions": (
+            ["approve","reject"]
+            if interrupts
+            else []
+        ),
+    }
+
+
+@app.post(
+    "/api/interrupt/{thread_id}/resume"
+)
+async def interrupt_resume_api(
+        thread_id: str,
+        payload: InterruptResumeRequest,
+) -> dict[str,Any]:
+    if payload.approved is not None:
+        resume_value = payload.approved
+
+    elif payload.resume_value is not None:
+        resume_value = payload.resume_value
+
+    elif payload.action == "approve":
+        resume_value = True
+
+    elif payload.action == "reject":
+        resume_value = False
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "必须提供 approved、resume_value "
+                "或有效的 action。"
+            ),
+        )
+
+    try:
+        session_manager.get_session(
+            thread_id
+        )
+
+        result = await chat_runtime.aresume(
+            resume_value,
+            thread_id=thread_id,
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "status": "resumed",
+        "thread_id": thread_id,
+        "result": (
+            dict(result)
+            if isinstance(result,Mapping)
+            else str(result)
+        ),
+    }
