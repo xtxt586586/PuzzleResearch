@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import (
     AIMessage,
@@ -43,6 +43,10 @@ from common.session_manager import (
     SessionManager,
     SessionManagerError,
     SessionNotFoundError,
+)
+from agent.core.event_stream import (
+    event_stream_generator,
+    get_emitter,
 )
 
 
@@ -226,7 +230,7 @@ class SearchMode(BaseModel):
 class ImagePayload(BaseModel):
     name: str | None = None
     data: str
-    mime: str| None = None
+    mime: str | None = None
 
 
 class CancelRequest(BaseModel):
@@ -430,11 +434,92 @@ class ChatRequest(BaseModel):
 
 
 
+class ResearchRequest(BaseModel):
+    query: str
+    model: str | None = None
+    search_mode: SearchMode | None = None
+    agent_id: str | None = None
+    user_id: str | None = None
+    images: list[ImagePayload] | None = None
+
+    @field_validator("search_mode", mode="before")
+    @classmethod
+    def _coerce_search_mode(
+            cls,
+            value: Any,
+    ) -> SearchMode | None:
+        return _coerce_search_mode_input(value)
+
+
 class ChatResponse(BaseModel):
     id: str
     content: str
     role: str = "assistant"
     timestamp: str
+
+
+class EvidenceSource(BaseModel):
+    title: str = ""
+    url: str
+    rawUrl: str | None = None
+    domain: str | None = None
+    provider: str | None = None
+    publishedDate: str | None = None
+
+
+class EvidenceClaimEvidence(BaseModel):
+    url: str
+    snippet_hash: str | None = None
+    quote: str | None = None
+    heading_path: list[str] | None = None
+
+
+class EvidenceClaim(BaseModel):
+    claim: str
+    status: str
+    evidence_urls: list[str] = Field(default_factory=list)
+    evidence_passages: list[EvidenceClaimEvidence] = Field(
+        default_factory=list
+    )
+    score: float = 0.0
+    notes: str = ""
+
+
+class FetchPageItem(BaseModel):
+    url: str
+    raw_url: str
+    method: str
+    text: str | None = None
+    title: str | None = None
+    published_date: str | None = None
+    retrieved_date: str | None = None
+    markdown: str | None = None
+    http_status: int | None = None
+    error: str | None = None
+    attempts: int = 1
+
+
+class EvidencePassageItem(BaseModel):
+    url: str
+    text: str
+    start_char: int
+    end_char: int
+    heading: str | None = None
+    heading_path: list[str] | None = None
+    page_title: str | None = None
+    retrieved_at: str | None = None
+    method: str | None = None
+    quote: str | None = None
+    snippet_hash: str | None = None
+
+
+class EvidenceResponse(BaseModel):
+    sources: list[EvidenceSource] = Field(default_factory=list)
+    claims: list[EvidenceClaim] = Field(default_factory=list)
+    quality_summary: dict[str,Any] = Field(default_factory=dict)
+    fetched_pages: list[FetchPageItem] = Field(default_factory=list)
+    passages: list[EvidencePassageItem] = Field(default_factory=list)
+
 
 
 def _get_last_user_message(
@@ -1270,16 +1355,43 @@ async def _iter_chat_events(
     if current_task is not None:
         _active_chat_tasks[thread_id] = current_task
 
+    event_emitter = await get_emitter(thread_id)
+
+    async def publish_event(
+        payload: Mapping[str, Any],
+    ) -> None:
+        try:
+            raw_data = payload.get("data", {})
+
+            if isinstance(raw_data, Mapping):
+                event_data = dict(raw_data)
+            else:
+                event_data = {
+                    "value": raw_data,
+                }
+
+            await event_emitter.emit(
+                str(payload.get("type", "message")),
+                event_data,
+            )
+
+        except Exception:
+            # 事件订阅失败不应影响主对话流。
+            pass
+
     emitted_completion: str | None = None
 
     try:
-        yield {
+        status_payload = {
             "type": "status",
             "data": {
                 "text": "开始处理请求...",
                 "thread_id": thread_id,
             },
         }
+
+        await publish_event(status_payload)
+        yield status_payload
 
         async for runtime_event in (
             chat_runtime.astream_runtime_events(
@@ -1312,17 +1424,21 @@ async def _iter_chat_events(
 
                     emitted_completion = content
 
+                await publish_event(payload)
                 yield payload
 
-        yield {
+        done_payload = {
             "type": "done",
             "data": {
                 "thread_id": thread_id,
             },
         }
 
+        await publish_event(done_payload)
+        yield done_payload
+
     except asyncio.CancelledError:
-        yield {
+        cancelled_payload = {
             "type": "cancelled",
             "data": {
                 "thread_id": thread_id,
@@ -1330,14 +1446,20 @@ async def _iter_chat_events(
             },
         }
 
+        await publish_event(cancelled_payload)
+        yield cancelled_payload
+
     except Exception as exc:
-        yield {
+        error_payload = {
             "type": "error",
             "data": {
                 "thread_id": thread_id,
                 "message": str(exc),
             },
         }
+
+        await publish_event(error_payload)
+        yield error_payload
 
     finally:
         if (
@@ -1373,6 +1495,57 @@ async def _iter_sse_chat_stream(
             data=payload["data"],
             event_id=event_id,
         )
+
+
+def _as_message_event(frame: str) -> str:
+    if not frame:
+        return frame
+
+    if frame.lstrip().startswith(":"):
+        return frame
+
+    lines: list[str] = []
+
+    for line in frame.splitlines():
+        if line.startswith("event:"):
+            continue
+
+        lines.append(line)
+
+    return "\n".join(lines).rstrip("\n") + "\n\n"
+
+
+@app.get(
+    "/api/events/{thread_id}",
+    response_model=None,
+)
+async def stream_thread_events(
+    thread_id: str,
+    request: Request,
+    last_event_id: str | None = None,
+) -> StreamingResponse:
+    cursor = (
+        last_event_id
+        or request.headers.get("last-event-id")
+    )
+
+    async def event_generator():
+        async for frame in event_stream_generator(
+            thread_id,
+            timeout=300.0,
+            last_event_id=cursor,
+        ):
+            yield _as_message_event(frame)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/chat/cancel/{thread_id}")
@@ -1599,6 +1772,120 @@ async def resume_session_api(
     }
 
 
+def _mapping_list(value: Any) -> list[dict[str,Any]]:
+    if not isinstance(value,list):
+        return []
+
+    return [
+        dict(item)
+        for item in value
+        if isinstance(item,Mapping)
+    ]
+
+
+def _normalize_evidence_source(
+        item: Mapping[str,Any]
+) -> dict[str,Any]:
+    return {
+        "title": str(item.get("title","")),
+        "url": str(item.get("url","")),
+        "rawUrl": (
+            item.get("rawUrl")
+            or item.get("rawurl")
+        ),
+        "domain": item.get("domain"),
+        "provider": item.get("provider"),
+        "publishedDate": (
+            item.get("publishedDate")
+            or item.get("publisheddate")
+        ),
+    }
+
+
+def _evidence_from_snapshot(
+        snapshot: Mapping[str,Any],
+) -> EvidenceResponse:
+    raw_state = snapshot.get("state",{})
+
+    if not isinstance(raw_state,Mapping):
+        raw_state = {}
+
+    artifacts = raw_state.get(
+        "deepsearch_artifacts",
+        {},
+    )
+
+    if not isinstance(artifacts,Mapping):
+        artifacts = {}
+
+    raw_sources = (
+        raw_state.get("sources")
+        or artifacts.get("sources")
+        or []
+    )
+
+    sources = [
+        _normalize_evidence_source(item)
+        for item in _mapping_list(raw_sources)
+    ]
+    claims = _mapping_list(
+        artifacts.get("claims",[])
+    )
+
+    quality_summary = (
+        raw_state.get("quality_summary")
+        or artifacts.get("quality_summary")
+        or {}
+    )
+
+    if not isinstance(quality_summary,Mapping):
+        quality_summary = {}
+
+    fetched_pages = _mapping_list(
+        artifacts.get("fetched_pages",[])
+    )
+
+    passages = _mapping_list(
+        artifacts.get("passages",[])
+    )
+
+    return EvidenceResponse(
+        sources=sources,
+        claims=claims,
+        quality_summary=dict(quality_summary),
+        fetched_pages=fetched_pages,
+        passages=passages,
+    )
+
+
+@app.get(
+    "/api/sessions/{thread_id}/evidence",
+    response_model=EvidenceResponse,
+)
+async def get_session_evidence_api(
+        thread_id: str,
+) -> EvidenceResponse:
+    try:
+        snapshot = session_manager.get_state(
+            thread_id
+        )
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except (
+        SessionManagerError,
+        ValueError
+    ) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return _evidence_from_snapshot(snapshot)
+
 
 
 @app.post(
@@ -1776,6 +2063,134 @@ async def chat_sse(
             "X-Thread-ID": thread_id,
         },
     )
+
+
+
+@app.post("/api/research", response_model=None)
+async def research_api(
+        query: str,
+) -> StreamingResponse:
+    query = query.strip()
+
+    if not query:
+        raise HTTPException(
+            status_code=400,
+            detail="查询内容不能为空。",
+        )
+
+    thread_id = f"thread_{uuid.uuid4().hex}"
+
+    agent_id = "default"
+
+    agent_record,agent_profile = _resolve_agent_runtime(agent_id)
+
+    agent_model = agent_record.model.strip()
+    model_override = agent_model or None
+    model = (
+            model_override
+            or settings.primary_model
+    ).strip()
+
+    config = _build_chat_config(
+        thread_id=thread_id,
+        model=model,
+        search_mode=_normalize_search_mode(None),
+        agent_id=agent_id,
+        user_id="anonymous",
+        images=None,
+        agent_profile=agent_profile,
+        model_override=model_override,
+    )
+
+    return StreamingResponse(
+        _iter_legacy_chat_stream(
+            user_input=query,
+            history=[],
+            thread_id=thread_id,
+            config=config,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-Thread-ID": thread_id,
+        },
+    )
+
+
+@app.post("/api/research/sse")
+async def research_sse_api(
+        payload: ResearchRequest,
+) -> StreamingResponse:
+    query = payload.query.strip()
+
+    if not query:
+        raise HTTPException(
+            status_code=400,
+            detail="查询内容不能为空。",
+        )
+
+    thread_id = f"thread_{uuid.uuid4().hex}"
+
+    agent_id = (
+        payload.agent_id
+        or "default"
+    ).strip()
+
+    agent_record,agent_profile = _resolve_agent_runtime(agent_id)
+
+    requested_model = (
+        payload.model.strip()
+        if payload.model
+        else ""
+    )
+    agent_model = agent_record.model.strip()
+    model_override = (
+        requested_model
+        or agent_model
+        or None
+    )
+    model = (
+            model_override
+            or settings.primary_model
+    ).strip()
+    user_id = (
+        payload.user_id
+        or "anonymous"
+    ).strip()
+
+    search_mode = _normalize_search_mode(
+        payload.search_mode
+    )
+
+    config = _build_chat_config(
+        thread_id=thread_id,
+        model=model,
+        search_mode=search_mode,
+        agent_id=agent_id,
+        user_id=user_id,
+        images=payload.images,
+        agent_profile=agent_profile,
+        model_override=model_override,
+    )
+
+    return StreamingResponse(
+        _iter_sse_chat_stream(
+            user_input=query,
+            history=[],
+            thread_id=thread_id,
+            config=config,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-Thread-ID": thread_id,
+        },
+    )
+
 
 
 @app.get(

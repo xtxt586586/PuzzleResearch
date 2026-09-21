@@ -21,6 +21,9 @@ from tools.search import (
 )
 from tools.registry import ToolRegistry
 from tools.builtin import create_default_registry
+from agent.core.event_stream import (
+    get_emitter_sync,
+)
 
 
 def _extract_response_text(response: Any) -> str:
@@ -1524,6 +1527,39 @@ def _get_agent_tool_registry(
     return registry
 
 
+def _emit_tool_stream_event(
+        config: RunnableConfig,
+        event_type: str,
+        data: dict[str,Any],
+) -> None:
+    configurable = {}
+
+    if config:
+        configurable = config.get(
+            "configurable",
+            {},
+        ) or {}
+
+    thread_id = str(
+        configurable.get("thread_id","")
+    ).strip()
+
+    if not thread_id:
+        return
+
+    try:
+        emitter = get_emitter_sync(thread_id)
+
+        emitter.emit_sync(
+            event_type,
+            data,
+        )
+
+    except Exception:
+        pass
+
+
+
 def _make_tool_event(
         event_type: str,
         *,
@@ -2309,6 +2345,20 @@ def agent_tool_node(
                 f"{output}"
             )
 
+            _emit_tool_stream_event(
+                config,
+                "tool_result",
+                {
+                    "tool": tool.name,
+                    "result": cached_result,
+                    "success": True,
+                    "cached": True,
+                    "attempt": 1,
+                    "call_count": tool_call_count + 1,
+                    "duration_ms": 0.0,
+                },
+            )
+
             cache_event = _make_tool_event(
                 "tool_cache_hit",
                 tool_name=tool_name,
@@ -2347,6 +2397,20 @@ def agent_tool_node(
         0,
     )
 
+
+    _emit_tool_stream_event(
+        config,
+        "tool_start",
+        {
+            "tool": tool_name,
+            "args": arguments,
+            "call_count": tool_call_count + 1,
+            "attempt": 1,
+        },
+    )
+
+
+
     retry_count = 0
     attempt = 1
     execution_events = [
@@ -2383,6 +2447,17 @@ def agent_tool_node(
                             time.perf_counter() - attempt_started_at
                         ) * 1000,
                     )
+                )
+
+                _emit_tool_stream_event(
+                    config,
+                    "tool_error",
+                    {
+                        "tool": tool.name,
+                        "error": error_text,
+                        "attempt": attempt,
+                        "call_count": tool_call_count + 1,
+                    },
                 )
 
                 message = (
@@ -2426,6 +2501,18 @@ def agent_tool_node(
                 )
             )
 
+            _emit_tool_stream_event(
+                config,
+                "tool_progress",
+                {
+                    "tool": tool.name,
+                    "status": "retrying",
+                    "attempt": attempt,
+                    "call_count": tool_call_count + 1,
+                    "error": error_text,
+                },
+            )
+
             retry_count += 1
             attempt += 1
 
@@ -2457,6 +2544,38 @@ def agent_tool_node(
             ) * 1000,
         )
     )
+
+    duration_ms = (
+        time.perf_counter() - attempt_started_at
+    ) * 1000
+
+    if result_error:
+        _emit_tool_stream_event(
+            config,
+            "tool_error",
+            {
+                "tool": tool.name,
+                "error": result_error,
+                "result": tool_result,
+                "attempt": attempt,
+                "call_count": tool_call_count + 1,
+                "duration_ms": duration_ms,
+            },
+        )
+
+    else:
+        _emit_tool_stream_event(
+            config,
+            "tool_result",
+            {
+                "tool": tool.name,
+                "result": tool_result,
+                "success": True,
+                "attempt": attempt,
+                "call_count": tool_call_count + 1,
+                "duration_ms": duration_ms,
+            },
+        )
 
     if isinstance(tool_result, dict):
         result_error = str(tool_result.get("error", "")).strip()

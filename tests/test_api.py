@@ -7,6 +7,12 @@ from unittest.mock import (
     MagicMock,
     patch,
 )
+import asyncio
+
+from agent.core.event_stream import (
+    get_emitter,
+    remove_emitter_sync,
+)
 
 import main
 import json
@@ -442,6 +448,309 @@ class PublicApiTests(unittest.TestCase):
 
         first_task.cancel.assert_called_once()
         second_task.cancel.assert_called_once()
+
+    def test_research_returns_legacy_stream(self):
+        async def fake_events(*args, **kwargs):
+            yield RuntimeEvent(
+                event="on_chain_end",
+                name="finalize",
+                data={
+                    "output": {
+                        "final_report": "Research 回答",
+                    }
+                },
+            )
+
+        with patch.object(
+                main.chat_runtime,
+                "astream_runtime_events",
+                new=fake_events,
+        ):
+            response = self.client.post(
+                "/api/research",
+                params={"query": "测试研究"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            '0:{"type":"completion"',
+            response.text,
+        )
+        self.assertTrue(
+            response.headers["x-thread-id"].startswith(
+                "thread_"
+            )
+        )
+
+    def test_research_sse_returns_standard_stream(self):
+        async def fake_events(*args, **kwargs):
+            yield RuntimeEvent(
+                event="on_chain_end",
+                name="finalize",
+                data={
+                    "output": {
+                        "final_report": "Research SSE 回答",
+                    }
+                },
+            )
+
+        with patch.object(
+                main.chat_runtime,
+                "astream_runtime_events",
+                new=fake_events,
+        ):
+            response = self.client.post(
+                "/api/research/sse",
+                json={
+                    "query": "测试 SSE 研究",
+                    "search_mode": {
+                        "useDeepSearch": True,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: completion", response.text)
+        self.assertIn("event: done", response.text)
+        self.assertTrue(
+            response.headers["x-thread-id"].startswith(
+                "thread_"
+            )
+        )
+
+    def test_research_rejects_empty_query(self):
+        response = self.client.post(
+            "/api/research/sse",
+            json={"query": "   "},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_session_evidence_returns_contract(self):
+        with patch.object(
+                main.session_manager,
+                "get_state",
+                return_value={
+                    "thread_id": "thread-evidence-001",
+                    "state": {
+                        "sources": [
+                            {
+                                "title": "Example",
+                                "url": "https://example.com",
+                                "provider": "test",
+                            }
+                        ],
+                        "quality_summary": {
+                            "score": 0.9,
+                        },
+                        "deepsearch_artifacts": {
+                            "claims": [],
+                            "fetched_pages": [],
+                            "passages": [],
+                        },
+                    },
+                    "interrupts": [],
+                    "checkpoint_id": "checkpoint-001",
+                },
+        ):
+            response = self.client.get(
+                "/api/sessions/thread-evidence-001/evidence",
+            )
+
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+
+        self.assertEqual(
+            set(payload),
+            {
+                "sources",
+                "claims",
+                "quality_summary",
+                "fetched_pages",
+                "passages",
+            },
+        )
+        self.assertEqual(
+            payload["sources"][0]["url"],
+            "https://example.com",
+        )
+
+    def test_session_evidence_returns_404_for_unknown_thread(self):
+        response = self.client.get(
+            "/api/sessions/thread-evidence-missing/evidence",
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_events_replay_buffered_events(self):
+        thread_id = "thread-events-001"
+
+        async def seed_events():
+            emitter = await get_emitter(thread_id)
+
+            await emitter.emit(
+                "tool_start",
+                {
+                    "tool": "echo",
+                },
+            )
+
+            await emitter.emit(
+                "done",
+                {},
+            )
+
+        asyncio.run(seed_events())
+
+        try:
+            response = self.client.get(
+                f"/api/events/{thread_id}",
+            )
+        finally:
+            remove_emitter_sync(thread_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            response.headers["content-type"].startswith(
+                "text/event-stream"
+            )
+        )
+        self.assertIn("id: 1", response.text)
+        self.assertIn("id: 2", response.text)
+        self.assertNotIn(
+            "event: tool_start",
+            response.text,
+        )
+
+        frames = [
+            json.loads(
+                line.removeprefix("data: ")
+            )
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+
+        self.assertEqual(
+            frames[0]["type"],
+            "tool_start",
+        )
+        self.assertEqual(
+            frames[1]["type"],
+            "done",
+        )
+
+    def test_events_resume_after_last_event_id(self):
+        thread_id = "thread-events-002"
+
+        async def seed_events():
+            emitter = await get_emitter(thread_id)
+
+            await emitter.emit(
+                "tool_start",
+                {
+                    "tool": "echo",
+                },
+            )
+
+            await emitter.emit(
+                "done",
+                {},
+            )
+
+        asyncio.run(seed_events())
+
+        try:
+            response = self.client.get(
+                f"/api/events/{thread_id}",
+                headers={
+                    "Last-Event-ID": "1",
+                },
+            )
+        finally:
+            remove_emitter_sync(thread_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(
+            '"type": "tool_start"',
+            response.text,
+        )
+        self.assertIn(
+            '"type": "done"',
+            response.text,
+        )
+
+    def test_events_are_isolated_by_thread_id(self):
+        first_thread_id = "thread-events-isolated-001"
+        second_thread_id = "thread-events-isolated-002"
+
+        async def seed_events():
+            first_emitter = await get_emitter(
+                first_thread_id
+            )
+            second_emitter = await get_emitter(
+                second_thread_id
+            )
+
+            await first_emitter.emit(
+                "tool_result",
+                {
+                    "tool": "first",
+                },
+            )
+            await first_emitter.emit(
+                "done",
+                {},
+            )
+            await second_emitter.emit(
+                "tool_result",
+                {
+                    "tool": "second",
+                },
+            )
+            await second_emitter.emit(
+                "done",
+                {},
+            )
+
+        asyncio.run(seed_events())
+
+        try:
+            response = self.client.get(
+                f"/api/events/{first_thread_id}",
+            )
+        finally:
+            remove_emitter_sync(first_thread_id)
+            remove_emitter_sync(second_thread_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"tool": "first"', response.text)
+        self.assertNotIn('"tool": "second"', response.text)
+
+    def test_events_resume_after_terminal_cursor_finishes(self):
+        thread_id = "thread-events-terminal-001"
+
+        async def seed_events():
+            emitter = await get_emitter(thread_id)
+            await emitter.emit(
+                "done",
+                {},
+            )
+
+        asyncio.run(seed_events())
+
+        try:
+            response = self.client.get(
+                f"/api/events/{thread_id}",
+                headers={
+                    "Last-Event-ID": "1",
+                },
+            )
+        finally:
+            remove_emitter_sync(thread_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "")
 
 
 if __name__ == "__main__":

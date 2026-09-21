@@ -8,6 +8,13 @@ from agent.workflows.nodes import (
 from tools.registry import ToolDefinition, ToolRegistry
 from agent.core.profile import AgentProfile
 
+import asyncio
+
+from agent.core.event_stream import (
+    get_emitter_sync,
+    remove_emitter_sync,
+)
+
 
 class FakePlanningModel:
     def __init__(self, content):
@@ -1599,6 +1606,138 @@ class AgentToolNodeTests(unittest.TestCase):
                 1,
             )
 
+    def test_tool_execution_publishes_runtime_events(self):
+        thread_id = "thread-tool-events-001"
+
+        def echo_tool(text: str) -> dict[str, str]:
+            return {
+                "output": text,
+                "error": "",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="echo",
+                    description="返回输入文本",
+                    handler=echo_tool,
+                ),
+            ]
+        )
+
+        try:
+            result = agent_tool_node(
+                {
+                    "pending_tool_calls": [
+                        {
+                            "tool_name": "echo",
+                            "arguments": {
+                                "text": "hello",
+                            },
+                        },
+                    ],
+                    "tool_approved": True,
+                },
+                config={
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "tool_registry": registry,
+                    },
+                },
+            )
+
+            self.assertEqual(
+                result["status"],
+                "running",
+            )
+
+            emitter = get_emitter_sync(thread_id)
+            events = emitter.buffered_events()
+
+            self.assertEqual(
+                [
+                    event.event_type
+                    for event in events
+                ],
+                [
+                    "tool_start",
+                    "tool_result",
+                ],
+            )
+
+            self.assertEqual(
+                events[0].data["tool"],
+                "echo",
+            )
+            self.assertEqual(
+                events[1].data["result"]["output"],
+                "hello",
+            )
+
+        finally:
+            remove_emitter_sync(thread_id)
+
+    def test_failed_tool_publishes_tool_error_event(self):
+        thread_id = "thread-tool-events-002"
+
+        def failing_tool() -> dict[str, str]:
+            return {
+                "output": "",
+                "error": "测试工具错误",
+            }
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="failing_tool",
+                    description="返回错误",
+                    handler=failing_tool,
+                ),
+            ]
+        )
+
+        try:
+            result = agent_tool_node(
+                {
+                    "pending_tool_calls": [
+                        {
+                            "tool_name": "failing_tool",
+                            "arguments": {},
+                        },
+                    ],
+                    "tool_approved": True,
+                },
+                config={
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "tool_registry": registry,
+                    },
+                },
+            )
+
+            self.assertEqual(
+                result["status"],
+                "failed",
+            )
+
+            emitter = get_emitter_sync(thread_id)
+            events = emitter.buffered_events()
+
+            self.assertEqual(
+                events[-1].event_type,
+                "tool_error",
+            )
+            self.assertEqual(
+                events[-1].data["tool"],
+                "failing_tool",
+            )
+            self.assertIn(
+                "测试工具错误",
+                events[-1].data["error"],
+            )
+
+        finally:
+            remove_emitter_sync(thread_id)
 
 
 if __name__ == "__main__":
