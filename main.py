@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from time import monotonic
 from html import escape
 import hashlib
+import importlib.util
+import os
 
 import asyncio
 import inspect
@@ -343,6 +345,11 @@ async def _emit_chat_trigger_event(
 
 _active_chat_tasks: dict[str, asyncio.Task] = {}
 _thread_owners: dict[str, str] = {}
+
+# 2. 增加 MCP 状态
+_mcp_enabled = False
+_mcp_servers_config: dict[str, Any] = {}
+_mcp_loaded_tools = 0
 
 
 configured_api_key = (
@@ -719,6 +726,29 @@ class PublicConfigResponse(BaseModel):
     models: PublicConfigModels
 
 
+class SandboxBrowserConfigured(BaseModel):
+    e2b_api_key: bool
+    sandbox_template_browser: bool
+    e2b_code_interpreter: bool
+    playwright: bool
+
+
+class SandboxBrowserDeepResult(BaseModel):
+    ok: bool
+    latency_ms: int
+    frame_bytes: int | None = None
+    error: str | None = None
+
+
+class SandboxBrowserDiagnoseResponse(BaseModel):
+    ready: bool
+    missing: list[str]
+    sandbox_mode: str
+    allow_internet: bool
+    configured: SandboxBrowserConfigured
+    deep: SandboxBrowserDeepResult | None = None
+
+
 class Message(BaseModel):
     role: str
     content: str
@@ -917,6 +947,28 @@ class EventTriggerRequest(BaseModel):
         default_factory=list
     )
     user_id: str | None = None
+
+
+# 3. 增加请求模型
+class GraphInterruptResumeRequest(BaseModel):
+    thread_id: str
+    payload: Any
+    model: str | None = None
+    search_mode: SearchMode | None = None
+    agent_id: str | None = None
+
+    @field_validator("search_mode", mode="before")
+    @classmethod
+    def _coerce_search_mode(
+        cls,
+        value: Any,
+    ) -> SearchMode | None:
+        return _coerce_search_mode_input(value)
+
+
+class MCPConfigPayload(BaseModel):
+    enable: bool | None = None
+    servers: dict[str, Any] | None = None
 
 
 def _require_owned_session(
@@ -1441,6 +1493,171 @@ def _support_reply_from_result(
         return result.strip()
 
     return ""
+
+
+# 4. 增加辅助函数
+def _sandbox_mode() -> str:
+    return (
+        str(
+            getattr(
+                settings,
+                "sandbox_mode",
+                "local",
+            )
+            or "local"
+        ).strip()
+        or "local"
+    )
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        return False
+
+
+def _mcp_snapshot() -> dict[str, Any]:
+    return {
+        "enabled": bool(_mcp_enabled),
+        "servers": dict(_mcp_servers_config),
+        "loaded_tools": int(_mcp_loaded_tools),
+    }
+
+
+def _normalize_interrupt_resume_payload(
+    payload: Any,
+) -> Any:
+    if not isinstance(payload, Mapping):
+        return payload
+
+    if "resume_value" in payload:
+        return payload["resume_value"]
+
+    if "approved" in payload:
+        return bool(payload["approved"])
+
+    if "action" in payload:
+        action = str(
+            payload["action"]
+        ).strip().lower()
+
+        if action in {
+            "approve",
+            "approved",
+            "accept",
+        }:
+            return True
+
+        if action in {
+            "reject",
+            "rejected",
+            "deny",
+        }:
+            return False
+
+    if "tool_approved" in payload:
+        return bool(payload["tool_approved"])
+
+    decisions = payload.get("decisions")
+
+    if isinstance(decisions, list) and decisions:
+        first = decisions[0]
+
+        if isinstance(first, Mapping):
+            decision_type = str(
+                first.get("type", "")
+            ).strip().lower()
+
+            if decision_type in {
+                "approve",
+                "approved",
+                "edit",
+            }:
+                return {
+                    "approved": True,
+                    "edited_action": first.get(
+                        "edited_action"
+                    ),
+                }
+
+            if decision_type in {
+                "reject",
+                "rejected",
+            }:
+                return False
+
+    return dict(payload)
+
+
+def _serialize_resume_interrupts(
+    value: Any,
+) -> list[Any]:
+    if not value:
+        return []
+
+    if isinstance(value, Mapping):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = [value]
+
+    result: list[Any] = []
+
+    for item in items:
+        item_value = getattr(
+            item,
+            "value",
+            item,
+        )
+
+        if isinstance(item_value, Mapping):
+            result.append(dict(item_value))
+        elif isinstance(
+            item_value,
+            (str, int, float, bool),
+        ) or item_value is None:
+            result.append(item_value)
+        else:
+            result.append(str(item_value))
+
+    return result
+
+
+def _resume_result_response(
+    thread_id: str,
+    result: Any,
+) -> dict[str, Any]:
+    if isinstance(result, Mapping):
+        raw_interrupts = (
+            result.get("__interrupt__")
+            or result.get("interrupts")
+        )
+
+        interrupts = _serialize_resume_interrupts(
+            raw_interrupts
+        )
+
+        if interrupts:
+            return {
+                "status": "interrupted",
+                "interrupts": interrupts,
+            }
+
+        final_report = str(
+            result.get("final_report")
+            or ""
+        )
+
+    else:
+        final_report = str(result or "")
+
+    return ChatResponse(
+        id=f"msg_{uuid.uuid4().hex}",
+        content=final_report,
+        timestamp=_timestamp(),
+    ).model_dump(mode="json")
 
 
 class ChatRequest(BaseModel):
@@ -2014,6 +2231,147 @@ async def reset_search_provider_api() -> SearchProviderResetResponse:
     )
 
 
+# 8. 增加浏览器诊断接口
+@app.get(
+    "/api/sandbox/browser/diagnose",
+    response_model=SandboxBrowserDiagnoseResponse,
+)
+async def sandbox_browser_diagnose(
+    deep: bool = False,
+) -> SandboxBrowserDiagnoseResponse:
+    sandbox_mode = _sandbox_mode()
+    playwright_ready = _module_available(
+        "playwright"
+    )
+    e2b_ready = _module_available(
+        "e2b_code_interpreter"
+    )
+
+    e2b_api_key = str(
+        getattr(
+            settings,
+            "e2b_api_key",
+            "",
+        )
+        or ""
+    ).strip()
+
+    sandbox_template = (
+        os.getenv(
+            "SANDBOX_TEMPLATE_BROWSER",
+            "",
+        )
+        or str(
+            getattr(
+                settings,
+                "sandbox_template_browser",
+                "",
+            )
+            or ""
+        )
+    ).strip()
+
+    missing: list[str] = []
+
+    if sandbox_mode == "local":
+        if not playwright_ready:
+            missing.append("pip:playwright")
+    else:
+        if not e2b_api_key:
+            missing.append("E2B_API_KEY")
+
+        if not sandbox_template:
+            missing.append(
+                "SANDBOX_TEMPLATE_BROWSER"
+            )
+
+        if not e2b_ready:
+            missing.append(
+                "pip:e2b_code_interpreter"
+            )
+
+        if not playwright_ready:
+            missing.append("pip:playwright")
+
+    deep_result: (
+        SandboxBrowserDeepResult | None
+    ) = None
+
+    if deep:
+        started_at = monotonic()
+        view = BrowserLiveView()
+
+        try:
+            await view.start("about:blank")
+
+            captured = await view.capture(
+                full_page=False,
+                quality=50,
+            )
+
+            encoded = str(
+                captured.get("data", "")
+            )
+
+            try:
+                frame_bytes = len(
+                    base64.b64decode(
+                        encoded,
+                        validate=True,
+                    )
+                )
+            except Exception:
+                frame_bytes = None
+
+            deep_result = SandboxBrowserDeepResult(
+                ok=True,
+                latency_ms=int(
+                    (monotonic() - started_at)
+                    * 1000
+                ),
+                frame_bytes=frame_bytes,
+            )
+
+        except Exception as exc:
+            deep_result = SandboxBrowserDeepResult(
+                ok=False,
+                latency_ms=int(
+                    (monotonic() - started_at)
+                    * 1000
+                ),
+                error=str(exc),
+            )
+
+        finally:
+            try:
+                await view.stop()
+            except Exception:
+                pass
+
+    return SandboxBrowserDiagnoseResponse(
+        ready=not missing,
+        missing=missing,
+        sandbox_mode=sandbox_mode,
+        allow_internet=bool(
+            getattr(
+                settings,
+                "sandbox_allow_internet",
+                True,
+            )
+        ),
+        configured=SandboxBrowserConfigured(
+            e2b_api_key=bool(e2b_api_key),
+            sandbox_template_browser=bool(
+                sandbox_template
+            ),
+            e2b_code_interpreter=e2b_ready,
+            playwright=playwright_ready,
+        ),
+        deep=deep_result,
+    )
+
+
+# 5. 修改公开配置接口
 @app.get(
     "/api/config/public",
     response_model=PublicConfigResponse,
@@ -2027,8 +2385,8 @@ async def public_config() -> PublicConfigResponse:
             reasoning_model=settings.reasoning_model,
         ),
         features=PublicConfigFeatures(
-            mcp_enabled=False,
-            sandbox_mode="unavailable",
+            mcp_enabled=bool(_mcp_enabled),
+            sandbox_mode=_sandbox_mode(),
             prometheus_enabled=False,
             tracing_enabled=bool(
                 getattr(
@@ -2061,6 +2419,35 @@ async def public_config() -> PublicConfigResponse:
             options=_model_options(),
         ),
     )
+
+
+# 6. 增加 MCP 配置接口
+@app.get("/api/mcp/config")
+async def get_mcp_config() -> dict[str, Any]:
+    return _mcp_snapshot()
+
+
+@app.post("/api/mcp/config")
+async def update_mcp_config(
+    payload: MCPConfigPayload,
+) -> dict[str, Any]:
+    global _mcp_enabled
+    global _mcp_servers_config
+    global _mcp_loaded_tools
+
+    if payload.enable is not None:
+        _mcp_enabled = bool(payload.enable)
+
+    if payload.servers is not None:
+        _mcp_servers_config = dict(
+            payload.servers
+        )
+
+    # PuzzleResearch 当前没有 MCP 执行后端。
+    # 因此这里只保存配置，不虚报已加载工具数量。
+    _mcp_loaded_tools = 0
+
+    return _mcp_snapshot()
 
 
 @app.get(
@@ -4805,6 +5192,123 @@ async def interrupt_status_api(
             else []
         ),
     }
+
+
+# 7. 增加兼容恢复接口
+@app.post("/api/interrupt/resume")
+async def resume_interrupt_compat(
+    request: Request,
+    payload: GraphInterruptResumeRequest,
+) -> dict[str, Any]:
+    if chat_checkpointer is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Interrupts require a checkpointer",
+        )
+
+    thread_id = payload.thread_id.strip()
+
+    if not thread_id:
+        raise HTTPException(
+            status_code=400,
+            detail="thread_id is required",
+        )
+
+    principal = _resolve_request_principal(request)
+
+    try:
+        _session_manager_with_owner(
+            "get_session",
+            thread_id,
+            owner_id=principal.user_id,
+        )
+
+        agent_id = (
+            payload.agent_id
+            or "default"
+        ).strip() or "default"
+
+        agent_record, agent_profile = (
+            _resolve_agent_runtime(agent_id)
+        )
+
+        requested_model = (
+            payload.model.strip()
+            if payload.model
+            else ""
+        )
+
+        agent_model = (
+            agent_record.model.strip()
+        )
+
+        model_override = (
+            requested_model
+            or agent_model
+            or None
+        )
+
+        model = (
+            model_override
+            or settings.primary_model
+        ).strip()
+
+        config = _build_chat_config(
+            thread_id=thread_id,
+            model=model,
+            search_mode=_normalize_search_mode(
+                payload.search_mode
+            ),
+            agent_id=agent_id,
+            user_id=principal.user_id,
+            images=None,
+            agent_profile=agent_profile,
+            model_override=model_override,
+        )
+
+        resume_value = (
+            _normalize_interrupt_resume_payload(
+                payload.payload
+            )
+        )
+
+        result = await chat_runtime.aresume(
+            resume_value,
+            thread_id=thread_id,
+            config=config,
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    return _resume_result_response(
+        thread_id,
+        result,
+    )
 
 
 @app.post(
