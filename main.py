@@ -90,6 +90,14 @@ from common.audio_services import (
     get_asr_service,
     get_tts_service,
 )
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    StreamingResponse,
+)
+from tools.screenshot_store import (
+    get_screenshot_store,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -149,6 +157,35 @@ _PUBLIC_AUTH_PATHS = {
     "/redoc",
     "/openapi.json",
 }
+
+
+def _screenshot_store():
+    return get_screenshot_store(
+        root=str(
+            getattr(
+                settings,
+                "screenshot_store_path",
+                "./data/screenshots",
+            )
+            or "./data/screenshots"
+        ),
+        retention_hours=int(
+            getattr(
+                settings,
+                "screenshot_retention_hours",
+                24,
+            )
+            or 24
+        ),
+        max_bytes=int(
+            getattr(
+                settings,
+                "screenshot_max_bytes",
+                10 * 1024 * 1024,
+            )
+            or 10 * 1024 * 1024
+        ),
+    )
 
 
 def _extract_api_key(request: Request) -> str:
@@ -4810,4 +4847,92 @@ async def get_tts_status() -> dict[str, Any]:
             if service.last_error_time
             else None
         ),
+    }
+
+@app.get(
+    "/api/screenshots/{filename}",
+    response_model=None,
+)
+async def get_screenshot(
+    filename: str,
+) -> FileResponse:
+    path = _screenshot_store().get_path(
+        filename
+    )
+
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Screenshot not found",
+        )
+
+    media_type = (
+        "image/png"
+        if path.suffix.lower() == ".png"
+        else "image/jpeg"
+    )
+
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={
+            "Cache-Control": (
+                "public, max-age=3600"
+            ),
+        },
+    )
+
+
+@app.get("/api/screenshots")
+async def list_screenshots(
+    request: Request,
+    thread_id: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request
+    )
+
+    if configured_api_key:
+        if not thread_id:
+            raise HTTPException(
+                status_code=400,
+                detail="thread_id is required",
+            )
+
+        _assert_thread_owner(
+            thread_id,
+            principal,
+        )
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="limit 必须在 1 到 200 之间。",
+        )
+
+    screenshots = (
+        _screenshot_store().list_screenshots(
+            thread_id=thread_id,
+            limit=limit,
+        )
+    )
+
+    return {
+        "screenshots": screenshots,
+        "count": len(screenshots),
+        "thread_id": thread_id,
+    }
+
+
+@app.post("/api/screenshots/cleanup")
+async def cleanup_screenshots() -> dict[str, Any]:
+    deleted_count = await asyncio.to_thread(
+        _screenshot_store().cleanup_old
+    )
+
+    return {
+        "status": "completed",
+        "deleted_count": deleted_count,
+        "timestamp": _timestamp(),
     }

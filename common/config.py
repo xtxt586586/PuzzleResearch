@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     audio_max_bytes: int = 50 * 1024 * 1024
 
+    # ========== 截图存储配置 ==========
+
+    screenshot_store_path: str = "./data/screenshots"
+    screenshot_retention_hours: int = 24
+    screenshot_max_bytes: int = 10 * 1024 * 1024
+
     # ========== Agent 安全配置 ==========
 
     tool_approval: bool = False
