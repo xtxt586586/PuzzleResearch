@@ -53,6 +53,10 @@ from agent.core.principal import (
     resolve_principal,
 )
 from agent.core.checkpointer import create_checkpointer
+from common.cancellation import (
+    TaskStatus,
+    cancellation_manager,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -673,6 +677,84 @@ def _assert_thread_owner(
             status_code=403,
             detail=str(exc),
         ) from exc
+
+
+def _task_is_visible_to_principal(
+    task_id: str,
+    task_info: dict[str, Any],
+    principal_id: str,
+) -> bool:
+    owner_id = (
+        _thread_owners.get(task_id)
+        or ""
+    ).strip()
+
+    if owner_id:
+        return owner_id == principal_id
+
+    metadata = task_info.get("metadata", {})
+
+    if isinstance(metadata, Mapping):
+        metadata_owner = str(
+            metadata.get("user_id") or ""
+        ).strip()
+
+        if metadata_owner:
+            return metadata_owner == principal_id
+
+    return False
+
+
+async def _cancel_active_thread(
+    thread_id: str,
+    reason: str,
+) -> bool:
+    token = cancellation_manager.get_token(
+        thread_id
+    )
+
+    token_active = (
+        token is not None
+        and token.status in {
+            TaskStatus.PENDING,
+            TaskStatus.RUNNING,
+            TaskStatus.PAUSED,
+        }
+    )
+
+    task = _active_chat_tasks.pop(
+        thread_id,
+        None,
+    )
+
+    task_active = (
+        task is not None
+        and not task.done()
+    )
+
+    if not token_active and not task_active:
+        return False
+
+    if token_active:
+        await cancellation_manager.cancel(
+            thread_id,
+            reason,
+        )
+
+        try:
+            await chat_runtime.acancel(
+                thread_id=thread_id,
+            )
+        except Exception:
+            # Cancellation must still succeed when
+            # no checkpoint is currently available.
+            pass
+
+    if task_active:
+        task.cancel()
+
+    return True
+
 
 
 def _session_manager_with_owner(
@@ -1644,12 +1726,36 @@ async def _iter_chat_events(
         user_input: str,
         history: list[Any],
         thread_id: str,
-        config: dict[str,Any]
-) -> AsyncIterator[dict[str,Any]]:
+        config: dict[str, Any]
+) -> AsyncIterator[dict[str, Any]]:
     current_task = asyncio.current_task()
 
     if current_task is not None:
         _active_chat_tasks[thread_id] = current_task
+
+    configurable = (
+        config.get("configurable", {})
+        if isinstance(config, Mapping)
+        else {}
+    )
+
+    cancel_token = await cancellation_manager.create_token(
+        thread_id,
+        metadata={
+            "user_id": str(
+                configurable.get("user_id")
+                or _thread_owners.get(
+                    thread_id,
+                    "anonymous",
+                )
+            ),
+            "model": str(
+                configurable.get("model", "")
+            ),
+        },
+    )
+
+    cancel_token.mark_running()
 
     event_emitter = await get_emitter(thread_id)
 
@@ -1696,7 +1802,7 @@ async def _iter_chat_events(
                 config=config,
             )
         ):
-            if not isinstance(runtime_event,RuntimeEvent):
+            if not isinstance(runtime_event, RuntimeEvent):
                 runtime_event = RuntimeEvent.from_raw(
                     runtime_event
                 )
@@ -1730,10 +1836,15 @@ async def _iter_chat_events(
             },
         }
 
+        if cancel_token.status != TaskStatus.PAUSED:
+            cancel_token.mark_completed()
+
         await publish_event(done_payload)
         yield done_payload
 
     except asyncio.CancelledError:
+        cancel_token.cancel("任务已取消")
+
         cancelled_payload = {
             "type": "cancelled",
             "data": {
@@ -1746,6 +1857,8 @@ async def _iter_chat_events(
         yield cancelled_payload
 
     except Exception as exc:
+        cancel_token.mark_failed(str(exc))
+
         error_payload = {
             "type": "error",
             "data": {
@@ -1851,12 +1964,16 @@ async def stream_thread_events(
 
 @app.post("/api/chat/cancel/{thread_id}")
 async def cancel_chat(
-        thread_id: str,
-        request: Request,
-        payload: CancelRequest | None = None,
-) -> dict[str,Any]:
+    thread_id: str,
+    request: Request,
+    payload: CancelRequest | None = None,
+) -> dict[str, Any]:
     principal = _resolve_request_principal(request)
-    _assert_thread_owner(thread_id, principal)
+
+    _assert_thread_owner(
+        thread_id,
+        principal,
+    )
 
     reason = (
         payload.reason
@@ -1864,59 +1981,122 @@ async def cancel_chat(
         else "用户取消"
     )
 
-    task = _active_chat_tasks.pop(
+    cancelled = await _cancel_active_thread(
         thread_id,
-        None,
+        reason,
     )
 
-    if task is None or task.done():
+    if not cancelled:
         return {
             "status": "not_found",
             "thread_id": thread_id,
             "message": "任务已取消或不存在",
         }
 
-    task.cancel()
-
     return {
         "status": "cancelled",
         "thread_id": thread_id,
         "reason": reason,
-        "time_stamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": _timestamp(),
     }
 
 
 @app.post("/api/chat/cancel-all")
 async def cancel_all_chats(
-        request: Request,
-) -> dict[str,Any]:
+    request: Request,
+) -> dict[str, Any]:
     principal = _resolve_request_principal(request)
-    active_tasks = []
 
-    for thread_id, task in list(
-        _active_chat_tasks.items()
-    ):
-        owner_id = _thread_owners.get(
-            thread_id,
-            "anonymous",
+    candidate_ids = set(
+        _active_chat_tasks
+    )
+    candidate_ids.update(
+        cancellation_manager.get_active_tasks()
+    )
+
+    cancelled_count = 0
+
+    for thread_id in candidate_ids:
+        task_info = (
+            cancellation_manager
+            .get_active_tasks()
+            .get(thread_id, {})
         )
 
-        if owner_id != principal.user_id:
+        if configured_api_key and not _task_is_visible_to_principal(
+            thread_id,
+            task_info,
+            principal.user_id,
+        ):
             continue
 
-        active_tasks.append((thread_id, task))
-        _active_chat_tasks.pop(thread_id, None)
+        cancelled = await _cancel_active_thread(
+            thread_id,
+            "批量取消任务",
+        )
 
-    for _, task in active_tasks:
-        if not task.done():
-            task.cancel()
+        if cancelled:
+            cancelled_count += 1
 
     return {
         "status": "all_cancelled",
-        "cancelled_count": len(active_tasks),
-        "time_stamp": datetime.now(timezone.utc).isoformat(),
+        "cancelled_count": cancelled_count,
+        "timestamp": _timestamp(),
     }
 
+
+@app.get("/api/tasks/active")
+async def get_active_tasks(
+    request: Request,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(request)
+
+    active_tasks = (
+        cancellation_manager
+        .get_active_tasks()
+    )
+
+    if configured_api_key:
+        active_tasks = {
+            task_id: task_info
+            for task_id, task_info in active_tasks.items()
+            if _task_is_visible_to_principal(
+                task_id,
+                task_info,
+                principal.user_id,
+            )
+        }
+
+        stats = {
+            status.value: 0
+            for status in TaskStatus
+        }
+
+        for task_info in active_tasks.values():
+            status = task_info.get("status")
+
+            if status in stats:
+                stats[status] += 1
+
+        stats["total"] = len(active_tasks)
+    else:
+        stats = (
+            cancellation_manager
+            .get_stats()
+        )
+
+    stream_count = sum(
+        1
+        for thread_id in _active_chat_tasks
+        if thread_id in active_tasks
+    )
+
+    return {
+        "active_tasks": active_tasks,
+        "stats": stats,
+        "stream_count": stream_count,
+        "timestamp": _timestamp(),
+    }
 
 
 @app.get(
