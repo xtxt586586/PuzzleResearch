@@ -58,6 +58,10 @@ from common.cancellation import (
     cancellation_manager,
 )
 from common import collaboration
+from common.metrics import (
+    RunMetrics,
+    metrics_registry,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -474,6 +478,28 @@ class SearchCacheStateResponse(BaseModel):
 
 class SearchCacheClearResponse(BaseModel):
     cleared: int
+
+
+class RunEvidenceSummary(BaseModel):
+    sources_count: int = 0
+    unsupported_claims_count: int = 0
+    citation_coverage: float | None = None
+    query_coverage_score: float | None = None
+
+
+class RunMetricsResponse(BaseModel):
+    run_id: str
+    model: str
+    route: str = ""
+    started_at: str
+    ended_at: str | None = None
+    duration_ms: float
+    event_count: int
+    nodes_started: dict[str, int]
+    nodes_completed: dict[str, int]
+    errors: list[str]
+    cancelled: bool
+    evidence_summary: RunEvidenceSummary
 
 
 
@@ -1820,6 +1846,25 @@ async def _iter_chat_events(
 
     cancel_token.mark_running()
 
+    raw_search_mode = configurable.get(
+        "search_mode",
+    )
+
+    if isinstance(raw_search_mode, Mapping):
+        run_route = str(
+            raw_search_mode.get("mode", "")
+        )
+    else:
+        run_route = ""
+
+    run_metrics = metrics_registry.start(
+        thread_id,
+        model=str(
+            configurable.get("model", "")
+        ),
+        route=run_route,
+    )
+
     event_emitter = await get_emitter(thread_id)
 
     async def publish_event(
@@ -1870,6 +1915,11 @@ async def _iter_chat_events(
                     runtime_event
                 )
 
+            run_metrics.mark_event(
+                runtime_event.event,
+                runtime_event.name,
+            )
+
             for payload in _runtime_event_to_legacy_events(
                 runtime_event
             ):
@@ -1902,11 +1952,19 @@ async def _iter_chat_events(
         if cancel_token.status != TaskStatus.PAUSED:
             cancel_token.mark_completed()
 
+        run_metrics.finish(
+            cancelled=False,
+        )
+
         await publish_event(done_payload)
         yield done_payload
 
     except asyncio.CancelledError:
         cancel_token.cancel("任务已取消")
+
+        run_metrics.finish(
+            cancelled=True,
+        )
 
         cancelled_payload = {
             "type": "cancelled",
@@ -1921,6 +1979,11 @@ async def _iter_chat_events(
 
     except Exception as exc:
         cancel_token.mark_failed(str(exc))
+
+        run_metrics.add_error(str(exc))
+        run_metrics.finish(
+            cancelled=False,
+        )
 
         error_payload = {
             "type": "error",
@@ -2503,6 +2566,185 @@ async def get_session_evidence_api(
         ) from exc
 
     return _evidence_from_snapshot(snapshot)
+
+
+def _run_evidence_summary(
+    thread_id: str,
+) -> RunEvidenceSummary:
+    try:
+        snapshot = session_manager.get_state(
+            thread_id,
+        )
+    except Exception:
+        return RunEvidenceSummary()
+
+    raw_state = snapshot.get(
+        "state",
+        {},
+    )
+
+    if not isinstance(raw_state, Mapping):
+        return RunEvidenceSummary()
+
+    artifacts = raw_state.get(
+        "deepsearch_artifacts",
+        {},
+    )
+
+    if not isinstance(artifacts, Mapping):
+        artifacts = {}
+
+    sources = (
+        raw_state.get("sources")
+        or artifacts.get("sources")
+        or []
+    )
+
+    claims = artifacts.get(
+        "claims",
+        [],
+    )
+
+    unsupported_count = 0
+
+    if isinstance(claims, list):
+        for claim in claims:
+            if not isinstance(claim, Mapping):
+                continue
+
+            status = str(
+                claim.get("status", "")
+            ).lower()
+
+            if status in {
+                "unsupported",
+                "contradicted",
+            }:
+                unsupported_count += 1
+
+    quality = (
+        raw_state.get("quality_summary")
+        or artifacts.get("quality_summary")
+        or {}
+    )
+
+    if not isinstance(quality, Mapping):
+        quality = {}
+
+    citation = quality.get(
+        "citation_coverage",
+        quality.get("citation_coverage_score"),
+    )
+
+    query_coverage = quality.get(
+        "query_coverage_score",
+    )
+
+    if query_coverage is None:
+        nested = quality.get(
+            "query_coverage"
+        )
+
+        if isinstance(nested, Mapping):
+            query_coverage = nested.get(
+                "score"
+            )
+
+    def as_float(
+        value: Any,
+    ) -> float | None:
+        try:
+            return (
+                None
+                if value is None
+                else float(value)
+            )
+        except (TypeError, ValueError):
+            return None
+
+    return RunEvidenceSummary(
+        sources_count=(
+            len(sources)
+            if isinstance(sources, list)
+            else 0
+        ),
+        unsupported_claims_count=unsupported_count,
+        citation_coverage=as_float(citation),
+        query_coverage_score=as_float(
+            query_coverage
+        ),
+    )
+
+
+@app.get("/api/runs")
+async def list_runs_api(
+    request: Request,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request,
+    )
+
+    runs = metrics_registry.all()
+
+    if configured_api_key:
+        visible_runs = []
+
+        for run in runs:
+            thread_id = str(
+                run.get("run_id", "")
+            )
+
+            owner_id = _thread_owners.get(
+                thread_id,
+            )
+
+            if owner_id == principal.user_id:
+                visible_runs.append(run)
+
+        runs = visible_runs
+
+    return {
+        "runs": runs,
+        "count": len(runs),
+    }
+
+
+@app.get(
+    "/api/runs/{thread_id}",
+    response_model=RunMetricsResponse,
+)
+async def get_run_metrics_api(
+    thread_id: str,
+    request: Request,
+) -> RunMetricsResponse:
+    principal = _resolve_request_principal(
+        request,
+    )
+
+    if configured_api_key:
+        _assert_thread_owner(
+            thread_id,
+            principal,
+        )
+
+    metrics = metrics_registry.get(
+        thread_id,
+    )
+
+    if metrics is None:
+        raise HTTPException(
+            status_code=404,
+            detail="运行记录不存在。",
+        )
+
+    payload = metrics.to_dict()
+
+    return RunMetricsResponse(
+        **payload,
+        evidence_summary=_run_evidence_summary(
+            thread_id,
+        ),
+    )
 
 
 
