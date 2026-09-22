@@ -57,6 +57,7 @@ from common.cancellation import (
     TaskStatus,
     cancellation_manager,
 )
+from common import collaboration
 
 
 APP_STARTED_AT = monotonic()
@@ -241,6 +242,44 @@ class InterruptResumeRequest(BaseModel):
     resume_value: Any = None
     action: str | None = None
 
+
+class ShareRequest(BaseModel):
+    permissions: str = "view"
+    expires_hours: int | None = 72
+
+
+class CommentRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=10000)
+    message_id: str | None = None
+
+
+class SessionComment(BaseModel):
+    id: str
+    thread_id: str
+    message_id: str | None = None
+    author: str
+    content: str
+    created_at: str
+    updated_at: str
+
+
+class CommentsResponse(BaseModel):
+    comments: list[SessionComment]
+    count: int
+
+
+class SessionVersion(BaseModel):
+    id: str
+    thread_id: str
+    version_number: int
+    label: str
+    created_at: str
+    snapshot_size: int
+
+
+class VersionsResponse(BaseModel):
+    versions: list[SessionVersion]
+    count: int
 
 
 class AgentHealthResponse(BaseModel):
@@ -435,6 +474,30 @@ class SearchCacheStateResponse(BaseModel):
 
 class SearchCacheClearResponse(BaseModel):
     cleared: int
+
+
+
+def _require_owned_session(
+    thread_id: str,
+    request: Request,
+) -> Principal:
+    principal = _resolve_request_principal(request)
+
+    try:
+        _session_manager_with_owner(
+            "get_session",
+            thread_id,
+            owner_id=principal.user_id,
+        )
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SessionOwnerError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    return principal
+
+
+
 
 
 def _normalize_search_mode(
@@ -2929,3 +2992,190 @@ async def clear_search_cache_api():
     return SearchCacheClearResponse(
         cleared=manager.clear_cache(),
     )
+
+
+
+@app.post("/api/sessions/{thread_id}/share")
+async def create_share(
+    thread_id: str,
+    request: Request,
+    payload: ShareRequest,
+) -> dict[str, Any]:
+    principal = _require_owned_session(thread_id, request)
+
+    try:
+        link = collaboration.create_share_link(
+            thread_id,
+            principal.user_id,
+            permissions=payload.permissions,
+            expires_hours=payload.expires_hours,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    public_link = {
+        key: value
+        for key, value in link.items()
+        if key != "owner_id"
+    }
+    return {
+        "success": True,
+        "share": public_link,
+        "url": f"/share/{link['id']}",
+    }
+
+
+@app.get("/api/share/{share_id}")
+async def get_share(share_id: str) -> dict[str, Any]:
+    link = collaboration.get_share_link(share_id)
+    if link is None:
+        raise HTTPException(status_code=404, detail="分享链接不存在或已过期。")
+
+    try:
+        snapshot = _session_manager_with_owner(
+            "get_state",
+            link["thread_id"],
+            owner_id=link["owner_id"],
+        )
+    except (SessionNotFoundError, SessionOwnerError):
+        raise HTTPException(status_code=404, detail="分享会话不存在。") from None
+
+    state = snapshot.get("state", {})
+    raw_messages = state.get("messages", [])
+    messages = []
+
+    for message in raw_messages[-50:] if isinstance(raw_messages, list) else []:
+        if not isinstance(message, Mapping):
+            continue
+
+        role = str(message.get("role") or message.get("type") or "unknown").lower()
+        if role in {"human", "user"}:
+            role = "user"
+        elif role in {"ai", "assistant"}:
+            role = "assistant"
+
+        messages.append({
+            "role": role,
+            "content": message.get("content", ""),
+        })
+
+    public_link = {
+        key: value
+        for key, value in link.items()
+        if key != "owner_id"
+    }
+    title = (
+        state.get("title")
+        or state.get("topic")
+        or state.get("input")
+        or link["thread_id"]
+    )
+
+    return {
+        "success": True,
+        "share": public_link,
+        "session": {
+            "id": link["thread_id"],
+            "title": str(title),
+            "messages": messages,
+        },
+    }
+
+
+@app.delete("/api/share/{share_id}")
+async def delete_share(
+    share_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(request)
+
+    if not collaboration.delete_share_link(share_id, principal.user_id):
+        raise HTTPException(status_code=404, detail="分享链接不存在。")
+
+    return {"success": True, "id": share_id}
+
+
+@app.post("/api/sessions/{thread_id}/comments")
+async def add_session_comment(
+    thread_id: str,
+    request: Request,
+    payload: CommentRequest,
+) -> dict[str, Any]:
+    principal = _require_owned_session(thread_id, request)
+    comment = collaboration.add_comment(
+        thread_id,
+        payload.content.strip(),
+        principal.user_id,
+        payload.message_id,
+    )
+    return {"success": True, "comment": comment}
+
+
+@app.get(
+    "/api/sessions/{thread_id}/comments",
+    response_model=CommentsResponse,
+)
+async def get_session_comments(
+    thread_id: str,
+    request: Request,
+    message_id: str | None = None,
+) -> CommentsResponse:
+    _require_owned_session(thread_id, request)
+    comments = collaboration.get_comments(thread_id, message_id)
+    return CommentsResponse(comments=comments, count=len(comments))
+
+
+@app.get(
+    "/api/sessions/{thread_id}/versions",
+    response_model=VersionsResponse,
+)
+async def get_session_versions(
+    thread_id: str,
+    request: Request,
+) -> VersionsResponse:
+    principal = _require_owned_session(thread_id, request)
+    versions = collaboration.list_versions(thread_id, principal.user_id)
+    return VersionsResponse(versions=versions, count=len(versions))
+
+
+@app.post("/api/sessions/{thread_id}/versions")
+async def create_session_version(
+    thread_id: str,
+    request: Request,
+    label: str | None = None,
+) -> dict[str, Any]:
+    principal = _require_owned_session(thread_id, request)
+    snapshot = _session_manager_with_owner(
+        "get_state",
+        thread_id,
+        owner_id=principal.user_id,
+    )
+    version = collaboration.save_version(
+        thread_id,
+        principal.user_id,
+        snapshot,
+        label.strip() if label and label.strip() else None,
+    )
+    return {"success": True, "version": version}
+
+
+@app.post("/api/sessions/{thread_id}/restore/{version_id}")
+async def restore_session_version(
+    thread_id: str,
+    version_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    principal = _require_owned_session(thread_id, request)
+    snapshot = collaboration.get_version_snapshot(
+        thread_id,
+        version_id,
+        principal.user_id,
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="版本快照不存在。")
+
+    return {
+        "success": True,
+        "snapshot": snapshot,
+        "message": "已返回版本快照；当前不会直接覆盖运行时检查点。",
+    }
