@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     enable_memory: bool = True
     mem0_api_key: str = ""
 
+    # ========== 音频服务配置 ==========
+
+    dashscope_api_key: str = ""
+    audio_max_bytes: int = 50 * 1024 * 1024
+
     # ========== Agent 安全配置 ==========
 
     tool_approval: bool = False

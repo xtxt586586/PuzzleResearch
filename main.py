@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import json
 import uuid
+import base64
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -81,6 +82,13 @@ from tools.document_store import (
 )
 from common.support_memory import (
     get_support_memory_store,
+)
+from common.audio_services import (
+    AVAILABLE_VOICES,
+    DEFAULT_VOICE,
+    VALID_AUDIO_FORMATS,
+    get_asr_service,
+    get_tts_service,
 )
 
 
@@ -226,6 +234,58 @@ async def api_key_middleware(request: Request, call_next):
     request.state.principal_id = user_id or "internal"
 
     return await call_next(request)
+
+
+class ASRRequest(BaseModel):
+    audio_data: str
+    format: str = "wav"
+    sample_rate: int = 16000
+    language_hints: list[str] | None = None
+
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = DEFAULT_VOICE
+
+    @field_validator("text")
+    @classmethod
+    def _normalize_text(
+        cls,
+        value: str,
+    ) -> str:
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError(
+                "text 不能为空。"
+            )
+
+        return normalized
+
+
+def _dashscope_api_key() -> str:
+    return str(
+        getattr(
+            settings,
+            "dashscope_api_key",
+            "",
+        )
+        or ""
+    ).strip()
+
+
+def _audio_max_bytes() -> int:
+    return max(
+        int(
+            getattr(
+                settings,
+                "audio_max_bytes",
+                50 * 1024 * 1024,
+            )
+            or 50 * 1024 * 1024
+        ),
+        1,
+    )
 
 
 
@@ -4483,4 +4543,271 @@ async def restore_session_version(
         "success": True,
         "snapshot": snapshot,
         "message": "已返回版本快照；当前不会直接覆盖运行时检查点。",
+    }
+
+@app.post(
+    "/api/asr/recognize",
+    response_model=None,
+)
+async def recognize_speech(
+    payload: ASRRequest,
+) -> JSONResponse | dict[str, Any]:
+    service = get_asr_service(
+        _dashscope_api_key()
+    )
+
+    if not service.enabled:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "text": "",
+                "error": (
+                    "ASR service not available."
+                ),
+            },
+        )
+
+    normalized_format = payload.format.strip().lower()
+
+    if normalized_format not in VALID_AUDIO_FORMATS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "text": "",
+                "error": "Unsupported audio format.",
+            },
+        )
+
+    if not 8000 <= payload.sample_rate <= 48000:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "text": "",
+                "error": (
+                    "Sample rate must be between "
+                    "8000 and 48000 Hz."
+                ),
+            },
+        )
+
+    try:
+        audio_bytes = base64.b64decode(
+            payload.audio_data,
+            validate=True,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "text": "",
+                "error": (
+                    f"Invalid base64 audio data: {exc}"
+                ),
+            },
+        )
+
+    if not audio_bytes:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "text": "",
+                "error": "Audio data cannot be empty.",
+            },
+        )
+
+    if len(audio_bytes) > _audio_max_bytes():
+        return JSONResponse(
+            status_code=413,
+            content={
+                "success": False,
+                "text": "",
+                "error": "Audio file is too large.",
+            },
+        )
+
+    result = await asyncio.to_thread(
+        service.recognize_bytes,
+        audio_bytes,
+        format=normalized_format,
+        sample_rate=payload.sample_rate,
+        language_hints=payload.language_hints
+        or ["zh", "en"],
+    )
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "text": result.get("text", ""),
+            "metrics": result.get("metrics", {}),
+        }
+
+    return {
+        "success": False,
+        "text": "",
+        "error": result.get(
+            "error",
+            "ASR request failed.",
+        ),
+    }
+
+@app.post("/api/asr/upload")
+async def recognize_speech_upload(
+    file: UploadFile = File(...),
+    sample_rate: int = 16000,
+) -> dict[str, Any]:
+    if not 8000 <= sample_rate <= 48000:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Sample rate must be between "
+                "8000 and 48000 Hz."
+            ),
+        )
+
+    filename = file.filename or "audio.wav"
+    extension = (
+        filename.rsplit(".", 1)[-1].lower()
+        if "." in filename
+        else "wav"
+    )
+
+    if extension not in VALID_AUDIO_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported audio format "
+                f"'.{extension}'."
+            ),
+        )
+
+    audio_bytes = await file.read()
+
+    if len(audio_bytes) > _audio_max_bytes():
+        raise HTTPException(
+            status_code=413,
+            detail="Audio file is too large.",
+        )
+
+    service = get_asr_service(
+        _dashscope_api_key()
+    )
+
+    if not service.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="ASR service not available.",
+        )
+
+    result = await asyncio.to_thread(
+        service.recognize_bytes,
+        audio_bytes,
+        format=extension,
+        sample_rate=sample_rate,
+        language_hints=["zh", "en"],
+    )
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "text": result.get("text", ""),
+            "metrics": result.get("metrics", {}),
+        }
+
+    return {
+        "success": False,
+        "text": "",
+        "error": result.get(
+            "error",
+            "ASR request failed.",
+        ),
+    }
+
+@app.get("/api/asr/status")
+async def get_asr_status() -> dict[str, Any]:
+    api_key = _dashscope_api_key()
+    service = get_asr_service(api_key)
+
+    return {
+        "enabled": service.enabled,
+        "api_key_configured": bool(api_key),
+        "last_error": service.last_error,
+        "last_error_time": (
+            datetime.fromtimestamp(
+                service.last_error_time,
+                timezone.utc,
+            ).isoformat()
+            if service.last_error_time
+            else None
+        ),
+    }
+
+@app.post("/api/tts/synthesize")
+async def synthesize_speech(
+    payload: TTSRequest,
+) -> dict[str, Any]:
+    service = get_tts_service(
+        _dashscope_api_key()
+    )
+
+    if not service.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="TTS service not available.",
+        )
+
+    result = await asyncio.to_thread(
+        service.synthesize,
+        payload.text,
+        voice=payload.voice,
+    )
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "audio": result.get("audio", ""),
+            "format": result.get("format", "mp3"),
+            "voice": result.get(
+                "voice",
+                payload.voice,
+            ),
+        }
+
+    return {
+        "success": False,
+        "error": result.get(
+            "error",
+            "TTS request failed.",
+        ),
+    }
+
+@app.get("/api/tts/voices")
+async def get_tts_voices() -> dict[str, Any]:
+    return {
+        "voices": AVAILABLE_VOICES,
+        "default": DEFAULT_VOICE,
+    }
+
+
+@app.get("/api/tts/status")
+async def get_tts_status() -> dict[str, Any]:
+    api_key = _dashscope_api_key()
+    service = get_tts_service(api_key)
+
+    return {
+        "enabled": service.enabled,
+        "api_key_configured": bool(api_key),
+        "last_error": service.last_error,
+        "last_error_time": (
+            datetime.fromtimestamp(
+                service.last_error_time,
+                timezone.utc,
+            ).isoformat()
+            if service.last_error_time
+            else None
+        ),
     }
