@@ -8,7 +8,10 @@ from urllib.parse import quote
 import httpx
 
 from .sse import normalize_sse_event, parse_sse_frame
-from .types import StreamEvent
+from .types import (
+    ResearchTreeResponse,
+    StreamEvent,
+)
 
 
 @dataclass(frozen=True)
@@ -287,6 +290,27 @@ class PuzzleResearchClient:
     def get_evidence(self, thread_id: str) -> Any:
         safe_id = _encode_path_param(thread_id)
         return self.request_json(f"/api/sessions/{safe_id}/evidence")
+
+    def get_research_tree(
+        self,
+        thread_id: str,
+    ) -> ResearchTreeResponse:
+        safe_id = _encode_path_param(thread_id)
+
+        return self.request_json(
+            f"/api/sessions/{safe_id}/research-tree"
+        )
+
+    def stream_research_events(
+        self,
+        thread_id: str,
+        *,
+        last_event_id: int | str | None = None,
+    ) -> Iterator[StreamEvent]:
+        yield from self.stream_events(
+            thread_id,
+            last_event_id=last_event_id,
+        )
 
     def resume_session(
         self,
