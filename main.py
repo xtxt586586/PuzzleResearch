@@ -19,8 +19,10 @@ from fastapi import (
     HTTPException,
     Request,
     UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -97,6 +99,9 @@ from fastapi.responses import (
 )
 from tools.screenshot_store import (
     get_screenshot_store,
+)
+from tools.browser_session import (
+    browser_sessions,
 )
 
 
@@ -4936,3 +4941,141 @@ async def cleanup_screenshots() -> dict[str, Any]:
         "deleted_count": deleted_count,
         "timestamp": _timestamp(),
     }
+
+@app.get("/api/browser/{thread_id}/info")
+async def get_browser_session_info(
+    thread_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request
+    )
+
+    _assert_thread_owner(
+        thread_id,
+        principal,
+    )
+
+    session = browser_sessions.peek(
+        thread_id
+    )
+    page = (
+        session.current
+        if session is not None
+        else None
+    )
+
+    return {
+        "active": page is not None,
+        "thread_id": thread_id,
+        "mode": "local" if page else None,
+        "cdp_endpoint": None,
+        "current_url": (
+            page.url
+            if page is not None
+            else None
+        ),
+        "title": (
+            page.title
+            if page is not None
+            else None
+        ),
+    }
+
+@app.post("/api/browser/{thread_id}/screenshot")
+async def trigger_browser_screenshot(
+    thread_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request
+    )
+
+    _assert_thread_owner(
+        thread_id,
+        principal,
+    )
+
+    session = browser_sessions.peek(
+        thread_id
+    )
+
+    if session is None or session.current is None:
+        return {
+            "success": False,
+            "error": "No active browser session",
+        }
+
+    return {
+        "success": False,
+        "error": (
+            "当前本地 HTTP 浏览器会话不支持 "
+            "真实页面截图。"
+        ),
+    }
+
+@app.websocket("/api/browser/{thread_id}/stream")
+async def browser_stream(
+    websocket: WebSocket,
+    thread_id: str,
+) -> None:
+    await websocket.accept()
+
+    session = browser_sessions.peek(
+        thread_id
+    )
+
+    await websocket.send_json(
+        {
+            "type": "status",
+            "thread_id": thread_id,
+            "active": (
+                session is not None
+                and session.current is not None
+            ),
+            "mode": "local",
+        }
+    )
+
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            action = str(
+                payload.get("action", "")
+            ).strip().lower()
+
+            if action == "stop":
+                await websocket.send_json(
+                    {
+                        "type": "status",
+                        "message": "stopped",
+                    }
+                )
+                break
+
+            if action in {
+                "start",
+                "capture",
+            }:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": (
+                            "当前浏览器会话暂不支持 "
+                            "实时图像帧。"
+                        ),
+                    }
+                )
+                continue
+
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": (
+                        "不支持的浏览器操作。"
+                    ),
+                }
+            )
+
+    except WebSocketDisconnect:
+        return
