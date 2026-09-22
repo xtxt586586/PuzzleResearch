@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from time import monotonic
+from html import escape
 
 import asyncio
 import inspect
@@ -505,6 +506,12 @@ class RunMetricsResponse(BaseModel):
     errors: list[str]
     cancelled: bool
     evidence_summary: RunEvidenceSummary
+
+
+class ExportRequest(BaseModel):
+    format: str = "html"
+    title: str | None = None
+    template: str = "default"
 
 
 
@@ -2969,6 +2976,373 @@ async def get_all_traces_api(
         "count": len(traces),
         "traces": traces,
     }
+
+
+def _export_state_payload(
+    thread_id: str,
+    snapshot: Mapping[str, Any],
+    title: str | None,
+) -> dict[str, Any]:
+    state = snapshot.get(
+        "state",
+        {},
+    )
+
+    if not isinstance(state, Mapping):
+        state = {}
+
+    final_report = str(
+        state.get("final_report")
+        or state.get("draft_report")
+        or ""
+    ).strip()
+
+    if not final_report:
+        raise HTTPException(
+            status_code=404,
+            detail="该会话没有可导出的报告。",
+        )
+
+    artifacts = state.get(
+        "deepsearch_artifacts",
+        {},
+    )
+
+    if not isinstance(artifacts, Mapping):
+        artifacts = {}
+
+    sources = (
+        state.get("sources")
+        or artifacts.get("sources")
+        or []
+    )
+
+    claims = artifacts.get(
+        "claims",
+        [],
+    )
+
+    quality = (
+        state.get("quality_summary")
+        or artifacts.get("quality_summary")
+        or {}
+    )
+
+    if not isinstance(sources, list):
+        sources = []
+
+    if not isinstance(claims, list):
+        claims = []
+
+    if not isinstance(quality, Mapping):
+        quality = {}
+
+    return {
+        "thread_id": thread_id,
+        "title": (
+            title.strip()
+            if isinstance(title, str)
+            and title.strip()
+            else "Research Report"
+        ),
+        "report": final_report,
+        "sources": [
+            dict(item)
+            for item in sources
+            if isinstance(item, Mapping)
+        ],
+        "claims": [
+            dict(item)
+            for item in claims
+            if isinstance(item, Mapping)
+        ],
+        "quality": dict(quality),
+        "exported_at": _timestamp(),
+    }
+
+
+def _render_markdown_report(
+    payload: Mapping[str, Any],
+) -> str:
+    lines = [
+        f"# {payload['title']}",
+        "",
+        payload["report"],
+        "",
+    ]
+
+    sources = payload.get(
+        "sources",
+        [],
+    )
+
+    if isinstance(sources, list) and sources:
+        lines.extend(
+            [
+                "## Sources",
+                "",
+            ]
+        )
+
+        for source in sources:
+            if not isinstance(source, Mapping):
+                continue
+
+            url = str(
+                source.get("url", "")
+            ).strip()
+            title = str(
+                source.get("title")
+                or url
+                or "Source"
+            ).strip()
+
+            if url:
+                lines.append(
+                    f"- [{title}]({url})"
+                )
+            else:
+                lines.append(
+                    f"- {title}"
+                )
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _render_html_report(
+    payload: Mapping[str, Any],
+    template: str,
+) -> str:
+    title = escape(
+        str(payload["title"])
+    )
+
+    report = escape(
+        str(payload["report"])
+    ).replace(
+        "\n",
+        "<br>\n",
+    )
+
+    source_items: list[str] = []
+
+    sources = payload.get(
+        "sources",
+        [],
+    )
+
+    if isinstance(sources, list):
+        for source in sources:
+            if not isinstance(source, Mapping):
+                continue
+
+            url = str(
+                source.get("url", "")
+            ).strip()
+
+            label = escape(
+                str(
+                    source.get("title")
+                    or url
+                    or "Source"
+                )
+            )
+
+            if url:
+                source_items.append(
+                    "<li>"
+                    f'<a href="{escape(url)}">'
+                    f"{label}</a>"
+                    "</li>"
+                )
+            else:
+                source_items.append(
+                    f"<li>{label}</li>"
+                )
+
+    sources_html = ""
+
+    if source_items:
+        sources_html = (
+            "<section>"
+            "<h2>Sources</h2>"
+            "<ul>"
+            + "".join(source_items)
+            + "</ul>"
+            "</section>"
+        )
+
+    template_class = escape(
+        template or "default"
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+body {{
+    max-width: 900px;
+    margin: 40px auto;
+    padding: 0 24px;
+    color: #202124;
+    font-family: Arial, sans-serif;
+    line-height: 1.7;
+}}
+body.academic {{
+    font-family: Georgia, serif;
+}}
+body.minimal {{
+    max-width: 720px;
+}}
+h1 {{
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 12px;
+}}
+section {{
+    margin-top: 32px;
+}}
+a {{
+    color: #1769aa;
+}}
+</style>
+</head>
+<body class="{template_class}">
+<h1>{title}</h1>
+<main>{report}</main>
+{sources_html}
+</body>
+</html>
+"""
+
+
+@app.get("/api/export/templates")
+async def list_export_templates() -> dict[str, Any]:
+    return {
+        "templates": [
+            {
+                "id": "default",
+                "name": "Default",
+                "description": "标准研究报告模板。",
+            },
+            {
+                "id": "academic",
+                "name": "Academic",
+                "description": "学术风格研究报告模板。",
+            },
+            {
+                "id": "business",
+                "name": "Business",
+                "description": "商务风格研究报告模板。",
+            },
+            {
+                "id": "minimal",
+                "name": "Minimal",
+                "description": "简洁研究报告模板。",
+            },
+        ]
+    }
+
+
+@app.get("/api/export/{thread_id}")
+async def export_report_api(
+    thread_id: str,
+    request: Request,
+    format: str = "html",
+    title: str | None = None,
+    template: str = "default",
+):
+    principal = _require_owned_session(
+        thread_id,
+        request,
+    )
+
+    snapshot = _session_manager_with_owner(
+        "get_state",
+        thread_id,
+        owner_id=principal.user_id,
+    )
+
+    payload = _export_state_payload(
+        thread_id,
+        snapshot,
+        title,
+    )
+
+    format_name = str(
+        format or "html"
+    ).strip().lower()
+
+    if format_name == "json":
+        return JSONResponse(
+            content=payload,
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="'
+                    f'report_{thread_id}.json"'
+                ),
+            },
+        )
+
+    if format_name in {
+        "markdown",
+        "md",
+    }:
+        content = _render_markdown_report(
+            payload,
+        ).encode("utf-8")
+
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/markdown",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="'
+                    f'report_{thread_id}.md"'
+                ),
+            },
+        )
+
+    if format_name == "html":
+        content = _render_html_report(
+            payload,
+            template,
+        ).encode("utf-8")
+
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/html",
+            headers={
+                "Content-Disposition": (
+                    f'inline; filename="'
+                    f'report_{thread_id}.html"'
+                ),
+            },
+        )
+
+    if format_name in {
+        "pdf",
+        "doc",
+        "docx",
+    }:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"{format_name} 导出需要额外的可选依赖，"
+                "当前阶段暂未启用。"
+            ),
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "不支持的导出格式。"
+            "可用格式：json、markdown、html。"
+        ),
+    )
 
 
 
