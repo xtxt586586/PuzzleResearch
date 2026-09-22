@@ -3,6 +3,7 @@ from __future__ import annotations
 from time import monotonic
 
 import asyncio
+import inspect
 import json
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -10,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -35,19 +36,23 @@ from agent.core.profile import AgentProfile
 from agent.core.profile_adapter import (
     runtime_profile_from_record,
 )
-from langgraph.checkpoint.memory import (
-    InMemorySaver,
-)
+import hmac
 
 from common.session_manager import (
     SessionManager,
     SessionManagerError,
     SessionNotFoundError,
+    SessionOwnerError,
 )
 from agent.core.event_stream import (
     event_stream_generator,
     get_emitter,
 )
+from agent.core.principal import (
+    Principal,
+    resolve_principal,
+)
+from agent.core.checkpointer import create_checkpointer
 
 
 APP_STARTED_AT = monotonic()
@@ -60,7 +65,10 @@ app = FastAPI(
 
 
 
-chat_checkpointer = InMemorySaver()
+chat_checkpointer = create_checkpointer(
+    getattr(settings,"database_url",""),
+    fallback_to_memory=True,
+)
 
 chat_runtime = AgentRuntime(
     checkpointer=chat_checkpointer,
@@ -72,6 +80,123 @@ session_manager = SessionManager(
 )
 
 _active_chat_tasks: dict[str,asyncio.Task] = {}
+_thread_owners: dict[str, str] = {}
+
+
+
+configured_api_key = (
+    str(
+        getattr(
+            settings,
+            "internal_api_key",
+            "",
+        )
+        or ""
+    ).strip()
+    or str(
+    getattr(
+        settings,
+        "api_key",
+        "",
+    )
+    or ""
+).strip()
+)
+
+
+
+_PUBLIC_AUTH_PATHS = {
+    "/",
+    "/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+}
+
+
+def _extract_api_key(request: Request) -> str:
+    authorization = (
+        request.headers.get(
+            "authorization",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+
+    return (
+        request.headers.get(
+            "x-api-key",
+            "",
+        )
+        or ""
+    ).strip()
+
+
+def _extra_trusted_user_id(request: Request) -> str:
+    configured_header = (
+        str(
+            getattr(
+                settings,
+                "auth_user_header",
+                "X-Weaver-User",
+            )
+            or "X-Weaver-User"
+        ).strip()
+    )
+
+    return (
+        request.headers.get(configured_header)
+        or request.headers.get("X-Weaver-User")
+        or request.headers.get("x-user-id")
+        or request.headers.get("user-id")
+        or ""
+    ).strip()
+
+
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    path = request.url.path
+    method = request.method.upper()
+
+    user_id = _extra_trusted_user_id(request)
+
+    request.state.principal_id = user_id or "anonymous"
+    request.state.api_key_authenticated = False
+
+    should_authenticate = (
+        bool(configured_api_key)
+        and path.startswith("/api/")
+        and not path.startswith("/api/webhook/")
+        and path not in _PUBLIC_AUTH_PATHS
+        and method != "OPTIONS"
+    )
+
+    if not should_authenticate:
+        return await call_next(request)
+
+    provider_key = _extract_api_key(request)
+
+    if (
+        not provider_key
+        or not hmac.compare_digest(
+            provider_key,
+            configured_api_key,
+        )
+    ):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "API key 无效。"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    request.state.api_key_authenticated = True
+    request.state.principal_id = user_id or "internal"
+
+    return await call_next(request)
 
 
 
@@ -87,6 +212,7 @@ class SessionSummaryResponse(BaseModel):
     message_count: int
     agent_id: str
     user_id: str
+    owner_id: str = "anonymous"
 
 
 class SessionListResponse(BaseModel):
@@ -412,6 +538,169 @@ def _coerce_search_mode_input(
         useAgent=normalized["use_agent"],
         useDeepSearch=normalized["use_deep"],
     )
+
+
+
+def _resolve_request_principal(
+        request: Request,
+        requested_user_id: str | None = None,
+) -> Principal:
+
+    if getattr(
+        request.state,
+        "api_key_authenticated",
+        False,
+    ):
+        return Principal(
+            user_id=(
+                getattr(
+                    request.state,
+                    "principal_id",
+                    "",
+                )
+                or "internal"
+            ),
+            authenticated=True,
+        )
+
+    authorization = (
+        request.headers.get(
+            "authorization",
+            "",
+        )
+        or ""
+    ).strip()
+
+    api_key = None
+
+    if authorization.lower().startswith("bearer "):
+        api_key = authorization[7:].strip()
+
+    if not api_key:
+        api_key = (
+            request.headers.get(
+                "x-api-key",
+                "",
+            )
+            or ""
+        ).strip()
+
+    configured_header = (
+        str(
+            getattr(
+                settings,
+                "auth_user_header",
+                "X-Weaver-User",
+            )
+            or "X-Weaver-User"
+        ).strip()
+    )
+
+    header_user_id = (
+        request.headers.get(configured_header)
+        or request.headers.get("X-Weaver-User")
+        or request.headers.get("x-user-id")
+        or request.headers.get("user-id")
+        or ""
+    ).strip()
+
+    if configured_api_key:
+        user_id = header_user_id or "header"
+    else:
+
+        user_id = (
+            requested_user_id
+            or header_user_id
+            or "anonymous"
+        )
+
+    try:
+        return resolve_principal(
+            user_id=user_id,
+            api_key=api_key,
+            configured_api_key=configured_api_key,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=str(exc),
+        ) from exc
+
+
+def _register_thread_owner(
+        thread_id: str,
+        principal: Principal,
+) -> None:
+    _thread_owners[thread_id] = principal.user_id
+
+
+def _forget_thread_owner(
+        thread_id: str,
+) -> None:
+    _thread_owners.pop(thread_id, None)
+
+
+def _assert_thread_owner(
+        thread_id: str,
+        principal: Principal,
+) -> None:
+    registered_owner = _thread_owners.get(thread_id)
+
+    if registered_owner is not None:
+        if registered_owner != principal.user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="当前用户无权访问该会话。",
+            )
+        return
+
+    try:
+        session_manager.assert_owner(
+            thread_id,
+            principal.user_id,
+        )
+    except SessionNotFoundError:
+        # Keep anonymous event-stream fixtures and local development
+        # compatible when no persisted session exists yet.
+        if principal.is_anonymous:
+            return
+        raise HTTPException(
+            status_code=404,
+            detail=f"线程不存在：{thread_id}",
+        ) from None
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
+
+def _session_manager_with_owner(
+        method_name: str,
+        *args: Any,
+        owner_id: str,
+        **kwargs: Any,
+) -> Any:
+    method = getattr(session_manager, method_name)
+
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        supports_owner = True
+    else:
+        supports_owner = (
+            "owner_id" in inspect.signature(method).parameters
+            or any(
+                parameter.kind
+                is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        )
+
+    if supports_owner:
+        kwargs["owner_id"] = owner_id
+
+    return method(*args, **kwargs)
 
 
 
@@ -1472,6 +1761,8 @@ async def _iter_chat_events(
                 None,
             )
 
+        _forget_thread_owner(thread_id)
+
 
 async def _iter_legacy_chat_stream(
         **kwargs: Any
@@ -1524,6 +1815,9 @@ async def stream_thread_events(
     request: Request,
     last_event_id: str | None = None,
 ) -> StreamingResponse:
+    principal = _resolve_request_principal(request)
+    _assert_thread_owner(thread_id, principal)
+
     cursor = (
         last_event_id
         or request.headers.get("last-event-id")
@@ -1551,8 +1845,12 @@ async def stream_thread_events(
 @app.post("/api/chat/cancel/{thread_id}")
 async def cancel_chat(
         thread_id: str,
+        request: Request,
         payload: CancelRequest | None = None,
 ) -> dict[str,Any]:
+    principal = _resolve_request_principal(request)
+    _assert_thread_owner(thread_id, principal)
+
     reason = (
         payload.reason
         if payload is not None
@@ -1582,12 +1880,25 @@ async def cancel_chat(
 
 
 @app.post("/api/chat/cancel-all")
-async def cancel_all_chats() -> dict[str,Any]:
-    active_tasks = list(
-        _active_chat_tasks.items()
-    )
+async def cancel_all_chats(
+        request: Request,
+) -> dict[str,Any]:
+    principal = _resolve_request_principal(request)
+    active_tasks = []
 
-    _active_chat_tasks.clear()
+    for thread_id, task in list(
+        _active_chat_tasks.items()
+    ):
+        owner_id = _thread_owners.get(
+            thread_id,
+            "anonymous",
+        )
+
+        if owner_id != principal.user_id:
+            continue
+
+        active_tasks.append((thread_id, task))
+        _active_chat_tasks.pop(thread_id, None)
 
     for _, task in active_tasks:
         if not task.done():
@@ -1606,13 +1917,18 @@ async def cancel_all_chats() -> dict[str,Any]:
     response_model=SessionListResponse,
 )
 async def list_sessions_api(
+        request: Request,
         limit: int = 50,
         status: str | None = None,
 ) -> SessionListResponse:
+    principal = _resolve_request_principal(request)
+
     try:
-        sessions = session_manager.list_sessions(
+        sessions = _session_manager_with_owner(
+            "list_sessions",
             limit=limit,
             status=status,
+            owner_id=principal.user_id,
         )
 
     except SessionManagerError as exc:
@@ -1638,17 +1954,27 @@ async def list_sessions_api(
 )
 async def get_session_api(
         thread_id: str,
+        request: Request,
 ) -> SessionSummaryResponse:
+    principal = _resolve_request_principal(request)
     try:
-        session = session_manager.get_session(
-            thread_id
+        session = _session_manager_with_owner(
+            "get_session",
+            thread_id,
+            owner_id=principal.user_id,
         )
 
     except SessionNotFoundError as exc:
         raise HTTPException(
             status_code=404,
             detail=str(exc),
-        )
+        ) from exc
+
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
 
     except SessionManagerError as exc:
         raise HTTPException(
@@ -1667,10 +1993,14 @@ async def get_session_api(
 )
 async def get_session_state_api(
         thread_id: str,
+        request: Request,
 ) -> SessionStateResponse:
+    principal = _resolve_request_principal(request)
     try:
-        state = session_manager.get_state(
-            thread_id
+        state = _session_manager_with_owner(
+            "get_state",
+            thread_id,
+            owner_id=principal.user_id,
         )
 
     except SessionNotFoundError as exc:
@@ -1688,6 +2018,12 @@ async def get_session_state_api(
             detail=str(exc),
         ) from exc
 
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
     return SessionStateResponse.model_validate(
         state
     )
@@ -1697,10 +2033,15 @@ async def get_session_state_api(
 )
 async def delete_session_api(
         thread_id: str,
+        request: Request,
 ) -> dict[str,str]:
+    principal = _resolve_request_principal(request)
+
     try:
-        session_manager.delete_session(
-            thread_id
+        _session_manager_with_owner(
+            "delete_session",
+            thread_id,
+            owner_id=principal.user_id,
         )
 
     except SessionNotFoundError as exc:
@@ -1715,6 +2056,12 @@ async def delete_session_api(
             detail=str(exc),
         ) from exc
 
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
     return {
         "status": "deleted",
         "thread_id": thread_id,
@@ -1725,8 +2072,10 @@ async def delete_session_api(
 )
 async def resume_session_api(
         thread_id: str,
+        request: Request,
         payload: SessionResumeRequest,
 ) -> dict[str,Any]:
+    principal = _resolve_request_principal(request)
     resume_value = (
         payload.resume_value
         if payload is not None
@@ -1734,8 +2083,10 @@ async def resume_session_api(
     )
 
     try:
-        session_manager.get_session(
-            thread_id
+        _session_manager_with_owner(
+            "get_session",
+            thread_id,
+            owner_id=principal.user_id,
         )
 
         result = await chat_runtime.aresume(
@@ -1752,6 +2103,12 @@ async def resume_session_api(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
             detail=str(exc),
         ) from exc
 
@@ -1864,10 +2221,15 @@ def _evidence_from_snapshot(
 )
 async def get_session_evidence_api(
         thread_id: str,
+        request: Request,
 ) -> EvidenceResponse:
+    principal = _resolve_request_principal(request)
+
     try:
-        snapshot = session_manager.get_state(
-            thread_id
+        snapshot = _session_manager_with_owner(
+            "get_state",
+            thread_id,
+            owner_id=principal.user_id,
         )
     except SessionNotFoundError as exc:
         raise HTTPException(
@@ -1884,6 +2246,12 @@ async def get_session_evidence_api(
             detail=str(exc),
         ) from exc
 
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
     return _evidence_from_snapshot(snapshot)
 
 
@@ -1892,9 +2260,15 @@ async def get_session_evidence_api(
     "/api/chat",
     response_model=None,
 )
-async def chat(
+async def chat_api(
         payload: ChatRequest,
+        request: Request,
 ) -> ChatResponse | StreamingResponse:
+
+    principal = _resolve_request_principal(
+        request,
+        payload.user_id,
+    )
     last_index,user_input = _get_last_user_message(
         payload.messages
     )
@@ -1927,10 +2301,7 @@ async def chat(
             model_override
             or settings.primary_model
     ).strip()
-    user_id = (
-        payload.user_id
-        or "anonymous"
-    ).strip()
+    user_id = principal.user_id
 
     search_mode = _normalize_search_mode(
         payload.search_mode
@@ -1941,10 +2312,15 @@ async def chat(
         model=model,
         search_mode=search_mode,
         agent_id=agent_id,
-        user_id=user_id,
+        user_id=principal.user_id,
         images=payload.images,
         agent_profile=agent_profile,
         model_override=model_override,
+    )
+
+    _register_thread_owner(
+        thread_id,
+        principal,
     )
 
     if payload.stream:
@@ -1975,6 +2351,8 @@ async def chat(
             status_code=500,
             detail=str(exc),
         ) from exc
+    finally:
+        _forget_thread_owner(thread_id)
 
     final_report = str(
         result.get("final_report","")
@@ -1997,7 +2375,13 @@ async def chat(
 @app.post("/api/chat/sse")
 async def chat_sse(
         payload: ChatRequest,
+        request: Request,
 ) -> StreamingResponse:
+    principal = _resolve_request_principal(
+        request,
+        payload.user_id,
+    )
+
     last_index,user_input = _get_last_user_message(
         payload.messages
     )
@@ -2030,10 +2414,7 @@ async def chat_sse(
             model_override
             or settings.primary_model
     ).strip()
-    user_id = (
-        payload.user_id
-        or "anonymous"
-    ).strip()
+    user_id = principal.user_id
     search_mode = _normalize_search_mode(
         payload.search_mode
     )
@@ -2046,6 +2427,11 @@ async def chat_sse(
         images=payload.images,
         agent_profile=agent_profile,
         model_override=model_override,
+    )
+
+    _register_thread_owner(
+        thread_id,
+        principal,
     )
 
     return StreamingResponse(
@@ -2069,7 +2455,9 @@ async def chat_sse(
 @app.post("/api/research", response_model=None)
 async def research_api(
         query: str,
+        request: Request,
 ) -> StreamingResponse:
+    principal = _resolve_request_principal(request)
     query = query.strip()
 
     if not query:
@@ -2096,10 +2484,15 @@ async def research_api(
         model=model,
         search_mode=_normalize_search_mode(None),
         agent_id=agent_id,
-        user_id="anonymous",
+        user_id=principal.user_id,
         images=None,
         agent_profile=agent_profile,
         model_override=model_override,
+    )
+
+    _register_thread_owner(
+        thread_id,
+        principal,
     )
 
     return StreamingResponse(
@@ -2122,7 +2515,13 @@ async def research_api(
 @app.post("/api/research/sse")
 async def research_sse_api(
         payload: ResearchRequest,
+        request: Request,
 ) -> StreamingResponse:
+    principal = _resolve_request_principal(
+        request,
+        payload.user_id,
+    )
+
     query = payload.query.strip()
 
     if not query:
@@ -2155,10 +2554,7 @@ async def research_sse_api(
             model_override
             or settings.primary_model
     ).strip()
-    user_id = (
-        payload.user_id
-        or "anonymous"
-    ).strip()
+    user_id = principal.user_id
 
     search_mode = _normalize_search_mode(
         payload.search_mode
@@ -2173,6 +2569,11 @@ async def research_sse_api(
         images=payload.images,
         agent_profile=agent_profile,
         model_override=model_override,
+    )
+
+    _register_thread_owner(
+        thread_id,
+        principal,
     )
 
     return StreamingResponse(
@@ -2198,15 +2599,26 @@ async def research_sse_api(
 )
 async def interrupt_status_api(
         thread_id: str,
+        request: Request,
 ) -> dict[str,Any]:
+    principal = _resolve_request_principal(request)
+
     try:
-        state = session_manager.get_state(
-            thread_id
+        state = _session_manager_with_owner(
+            "get_state",
+            thread_id,
+            owner_id=principal.user_id,
         )
 
     except SessionNotFoundError as exc:
         raise HTTPException(
             status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
             detail=str(exc),
         ) from exc
 
@@ -2231,8 +2643,11 @@ async def interrupt_status_api(
 )
 async def interrupt_resume_api(
         thread_id: str,
+        request: Request,
         payload: InterruptResumeRequest,
 ) -> dict[str,Any]:
+    principal = _resolve_request_principal(request)
+
     if payload.approved is not None:
         resume_value = payload.approved
 
@@ -2255,8 +2670,10 @@ async def interrupt_resume_api(
         )
 
     try:
-        session_manager.get_session(
-            thread_id
+        _session_manager_with_owner(
+            "get_session",
+            thread_id,
+            owner_id=principal.user_id,
         )
 
         result = await chat_runtime.aresume(
@@ -2273,6 +2690,12 @@ async def interrupt_resume_api(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
             detail=str(exc),
         ) from exc
 

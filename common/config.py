@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     # ========== 应用基础配置 ==========
@@ -31,6 +33,21 @@ class Settings(BaseSettings):
     debug: bool = True
     host: str = "127.0.0.1"
     port: int = 8001
+
+    # Optional API authentication for public HTTP endpoints.
+    # An empty value keeps local development in anonymous mode.
+    api_key: str = ""
+
+    internal_api_key: str = Field(
+        default="",
+        description="WEAVER_INTERNAL_API_KEY",
+    )
+
+    auth_user_header: str = Field(
+        default="X-Auth-User",
+        validation_alias="WEAVE_AUTH_USER_HEADER",
+        description="可信用户身份请求头。",
+    )
 
     # ========== DeepSeek 配置 ==========
 

@@ -10,3 +10,5 @@ fastapi==0.134.0
 uvicorn[standard]==0.41.0
 python-multipart==0.0.32
 httpx==0.28.1
+langgraph-checkpoint-postgres>=3.0,<4.0
+psycopg[binary]>=3.2,<4.0

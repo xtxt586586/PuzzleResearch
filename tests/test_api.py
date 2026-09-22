@@ -752,6 +752,89 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.text, "")
 
+    def test_api_key_middleware_rejects_invalid_key(self):
+        with patch.object(
+                main,
+                "configured_api_key",
+                "secret-key",
+        ):
+            response = self.client.get(
+                "/api/config/public",
+                headers={
+                    "Authorization": "Bearer wrong-key",
+                },
+            )
+
+        self.assertEqual(
+            response.status_code,
+            401,
+        )
+
+    def test_api_key_middleware_accepts_valid_key(self):
+        with patch.object(
+                main,
+                "configured_api_key",
+                "secret-key",
+        ):
+            response = self.client.get(
+                "/api/config/public",
+                headers={
+                    "Authorization": "Bearer secret-key",
+                    "X-Weaver-User": "user-001",
+                },
+            )
+
+        self.assertEqual(
+            response.status_code,
+            200,
+        )
+
+    def test_authenticated_request_cannot_override_owner_with_body_user_id(self):
+        with patch.object(
+                main,
+                "configured_api_key",
+                "secret-key",
+        ):
+            with patch.object(
+                    main.chat_runtime,
+                    "ainvoke",
+                    new=AsyncMock(
+                        return_value={
+                            "final_report": "测试回答",
+                            "status": "completed",
+                        },
+                    ),
+            ) as invoke:
+                response = self.client.post(
+                    "/api/chat",
+                    headers={
+                        "Authorization": "Bearer secret-key",
+                        "X-Weaver-User": "owner-001",
+                    },
+                    json={
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "测试",
+                            },
+                        ],
+                        "stream": False,
+                        "user_id": "attacker-001",
+                    },
+                )
+
+        self.assertEqual(
+            response.status_code,
+            200,
+        )
+
+        runtime_config = invoke.call_args.kwargs["config"]
+
+        self.assertEqual(
+            runtime_config["configurable"]["user_id"],
+            "owner-001",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
