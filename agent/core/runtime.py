@@ -337,6 +337,31 @@ class AgentRuntime:
             "messages": list(messages or []),
         }
 
+    @staticmethod
+    def _attach_config_metadata(
+            payload: dict[str, Any],
+            runtime_config: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        configurable = runtime_config.get(
+            "configurable",
+            {},
+        ) or {}
+
+        if not isinstance(configurable, Mapping):
+            return payload
+
+        for key in (
+            "thread_id",
+            "user_id",
+            "agent_id",
+        ):
+            value = configurable.get(key)
+
+            if value is not None:
+                payload.setdefault(key, value)
+
+        return payload
+
 
 
     def invoke(
@@ -371,6 +396,11 @@ class AgentRuntime:
             thread_id=thread_id,
         )
 
+        payload = self._attach_config_metadata(
+            payload,
+            runtime_config,
+        )
+
         return self.graph.invoke(
             payload,
             config=runtime_config,
@@ -397,6 +427,11 @@ class AgentRuntime:
         runtime_config = self._build_config(
             config=config,
             thread_id=thread_id,
+        )
+
+        payload = self._attach_config_metadata(
+            payload,
+            runtime_config,
         )
 
         return await self.graph.ainvoke(
@@ -741,6 +776,11 @@ class AgentRuntime:
             thread_id=thread_id,
         )
 
+        payload = self._attach_config_metadata(
+            payload,
+            runtime_config,
+        )
+
         return self.graph.stream(
             payload,
             config=runtime_config,
@@ -769,6 +809,11 @@ class AgentRuntime:
         runtime_config = self._build_config(
             config=config,
             thread_id=thread_id,
+        )
+
+        payload = self._attach_config_metadata(
+            payload,
+            runtime_config,
         )
 
         async for chunk in self.graph.astream(
@@ -866,6 +911,11 @@ class AgentRuntime:
             thread_id=thread_id,
         )
 
+        payload = self._attach_config_metadata(
+            payload,
+            runtime_config,
+        )
+
         return self._stream_sync_events(
             payload,
             runtime_config,
@@ -899,6 +949,11 @@ class AgentRuntime:
         runtime_config = self._build_config(
             config=config,
             thread_id=thread_id,
+        )
+
+        payload = self._attach_config_metadata(
+            payload,
+            runtime_config,
         )
 
         async for event in self.graph.astream_events(

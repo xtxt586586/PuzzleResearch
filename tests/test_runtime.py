@@ -1824,6 +1824,32 @@ class AgentRuntimeAsyncTests(
             "async-thread-001",
         )
 
+    async def test_ainvoke_persists_user_id_in_payload(self):
+        runtime = AgentRuntime()
+
+        with patch.object(
+            runtime.graph,
+            "ainvoke",
+            new_callable=AsyncMock,
+            return_value={"status": "completed"},
+        ) as graph_ainvoke:
+            await runtime.ainvoke(
+                "带用户的异步请求",
+                config={
+                    "configurable": {
+                        "thread_id": "owner-thread-001",
+                        "user_id": "user-001",
+                    }
+                },
+            )
+
+        payload = graph_ainvoke.call_args.args[0]
+
+        self.assertEqual(
+            payload["user_id"],
+            "user-001",
+        )
+
 
     async def test_ainvoke_executes_custom_registered_tool(self):
         def echo(text: str) -> str:

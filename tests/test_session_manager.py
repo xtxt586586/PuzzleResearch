@@ -8,6 +8,7 @@ from common.session_manager import (
     SessionManager,
     SessionManagerError,
     SessionNotFoundError,
+    SessionOwnerError,
 )
 
 
@@ -192,6 +193,42 @@ class SessionManagerTests(unittest.TestCase):
             len(sessions),
             1,
         )
+
+    def test_list_sessions_filters_by_owner(self):
+        sessions = self.manager.list_sessions(
+            limit=10,
+            owner_id="user-001",
+        )
+
+        self.assertEqual(
+            [item["thread_id"] for item in sessions],
+            ["thread-001"],
+        )
+
+    def test_get_session_rejects_wrong_owner(self):
+        with self.assertRaises(SessionOwnerError):
+            self.manager.get_session(
+                "thread-001",
+                owner_id="user-002",
+            )
+
+    def test_get_session_accepts_matching_owner(self):
+        session = self.manager.get_session(
+            "thread-001",
+            owner_id="user-001",
+        )
+
+        self.assertEqual(
+            session["owner_id"],
+            "user-001",
+        )
+
+    def test_delete_session_rejects_wrong_owner(self):
+        with self.assertRaises(SessionOwnerError):
+            self.manager.delete_session(
+                "thread-001",
+                owner_id="user-002",
+            )
 
     def test_get_session_returns_checkpoint_summary(self):
         session = self.manager.get_session(
