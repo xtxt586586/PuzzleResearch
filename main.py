@@ -1379,7 +1379,9 @@ def _model_options() -> list[str]:
 
 
 def _tool_registry_snapshot() -> dict[str,Any]:
-    registry = create_default_registry()
+    registry = create_default_registry(
+        include_browser=True,
+    )
     schemas = registry.describe_tools()
 
     tools: list[dict[str,Any]] = []
@@ -1638,7 +1640,9 @@ async def memory_status() -> dict[str, Any]:
     response_model=AgentHealthResponse,
 )
 async def agent_health() -> AgentHealthResponse:
-    registry = create_default_registry()
+    registry = create_default_registry(
+        include_browser=True,
+    )
 
     try:
         available_providers = SearchManager().available_providers()

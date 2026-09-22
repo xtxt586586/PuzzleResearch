@@ -1517,7 +1517,18 @@ def _get_agent_tool_registry(
     registry = configurable.get("tool_registry")
 
     if registry is None:
-        return create_default_registry()
+        thread_id = str(
+            configurable.get(
+                "thread_id",
+                "default",
+            )
+            or "default"
+        ).strip()
+
+        return create_default_registry(
+            thread_id=thread_id,
+            include_browser=True,
+        )
 
     if not isinstance(registry, ToolRegistry):
         raise TypeError(

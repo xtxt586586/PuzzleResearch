@@ -54,6 +54,30 @@ class BuiltinToolTests(unittest.TestCase):
             10.0,
         )
 
+    def test_browser_tools_are_available_when_enabled(self):
+        registry = create_default_registry(
+            thread_id="thread-001",
+            include_browser=True,
+        )
+
+        names = {
+            tool.name
+            for tool in registry.list_tools()
+        }
+
+        self.assertIn(
+            "browser_search",
+            names,
+        )
+        self.assertIn(
+            "browser_navigate",
+            names,
+        )
+        self.assertIn(
+            "browser_reset",
+            names,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

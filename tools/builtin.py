@@ -5,6 +5,9 @@ from typing import Any
 
 from tools.python_executor import PythonExecutor
 from tools.registry import ToolDefinition, ToolRegistry
+from tools.browser_tools import (
+    build_browser_tool_definitions,
+)
 
 
 DEFAULT_PYTHON_TIMEOUT_SECONDS = 5.0
@@ -48,17 +51,26 @@ def execute_python_tool(
     return asdict(result)
 
 
-def create_default_registry() -> ToolRegistry:
-    """
-    创建默认工具注册表。
-    """
-
-    return ToolRegistry(
-        [
-            ToolDefinition(
-                name="python_executor",
-                description="在受限时间和输出长度下执行 Python 代码",
-                handler=execute_python_tool,
+def create_default_registry(
+    *,
+    thread_id: str = "default",
+    include_browser: bool = False,
+) -> ToolRegistry:
+    definitions = [
+        ToolDefinition(
+            name="python_executor",
+            description=(
+                "在受限时间和输出长度下执行 Python 代码"
             ),
-        ]
-    )
+            handler=execute_python_tool,
+        ),
+    ]
+
+    if include_browser:
+        definitions.extend(
+            build_browser_tool_definitions(
+                thread_id
+            )
+        )
+
+    return ToolRegistry(definitions)
