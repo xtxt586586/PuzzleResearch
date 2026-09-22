@@ -10,6 +10,7 @@ from common.config import settings
 from agent.workflows.nodes import (
     direct_answer_node,
     finalize_node,
+    human_review_node,
     router_node,
     clarify_node,
     web_plan_node,
@@ -59,6 +60,7 @@ def create_research_graph(checkpointer=None):
     workflow.add_node("router",router_node)
     workflow.add_node("direct_answer",direct_answer_node)
     workflow.add_node("finalize",finalize_node)
+    workflow.add_node("human_review",human_review_node)
     workflow.add_node("web_plan",web_plan_node)
     workflow.add_node("deep_plan",deep_plan_node)
     workflow.add_node("deep_followup",deep_followup_plan_node)
@@ -155,7 +157,7 @@ def create_research_graph(checkpointer=None):
             return "finalize"
 
         if state.get("agent_finished"):
-            return "finalize"
+            return "human_review"
 
         tool_call_count = max(
             int(state.get("tool_call_count", 0)),
@@ -194,7 +196,7 @@ def create_research_graph(checkpointer=None):
     )
 
     #添加普通边
-    workflow.add_edge("direct_answer","finalize")
+    workflow.add_edge("direct_answer","human_review")
     workflow.add_edge("clarify","finalize")
     workflow.add_conditional_edges(
         "agent_plan",
@@ -210,6 +212,7 @@ def create_research_graph(checkpointer=None):
         {
             "finalize": "finalize",
             "agent_plan": "agent_plan",
+            "human_review": "human_review",
         },
     )
     workflow.add_conditional_edges(
@@ -238,10 +241,11 @@ def create_research_graph(checkpointer=None):
         {
             "deep_followup": "deep_followup",
             "revise": "revise",
-            "finalize": "finalize",
+            "human_review": "human_review",
         },
     )
     workflow.add_edge("revise","evaluator")
+    workflow.add_edge("human_review","finalize")
     workflow.add_edge("finalize",END)
 
     compile_kwargs = {}
@@ -341,7 +345,7 @@ def fan_out_deep_searches(
 
 def evaluation_decision(
         state: AgentState
-) -> Literal["deep_followup","revise","finalize"]:
+) -> Literal["deep_followup","revise","human_review"]:
     """
     根据评估结果决定修订或结束。
 
@@ -428,4 +432,4 @@ def evaluation_decision(
         f"max_revisions={max_revisions}",
     )
 
-    return "finalize"
+    return "human_review"

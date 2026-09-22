@@ -882,6 +882,13 @@ def _build_chat_config(
             ],
             "agent_profile": agent_profile,
             "model_override": model_override,
+            "human_review": bool(
+                getattr(
+                    settings,
+                    "human_review",
+                    False,
+                )
+            )
         },
         "recursion_limit": 50,
     }

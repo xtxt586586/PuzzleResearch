@@ -2745,3 +2745,89 @@ def finalize_node(
         "is_complete": not is_paused,
         "status": "paused" if is_paused else "completed",
     }
+
+
+def human_review_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str, Any]:
+    """
+    最终人工审核节点。
+
+    human_review 未启用时直接放行。
+    human_review 启用时通过 LangGraph interrupt 暂停，
+    等待人工批准或修改报告。
+    """
+
+    configurable = {}
+
+    if isinstance(config,Mapping):
+        configurable = (
+            config.get("configurable", {})
+            or {}
+        )
+
+    review_required = bool(
+        configurable.get(
+            "human_review",
+            getattr(
+                settings,
+                "human_review",
+                False,
+            ),
+        )
+    )
+
+    report = str(
+        state.get("final_report")
+        or state.get("draft_report")
+        or ""
+    ).strip()
+
+    if not review_required:
+        return {
+            "final_report": report,
+            "status": "running",
+        }
+
+    review_result = interrupt(
+        {
+            "type": "human_review",
+            "checkpoint": "final",
+            "instruction":(
+                "请审核最终报告。"
+                "可以直接批准，也可以返回修改后的内容。"
+            ),
+            "content": report,
+            "available_actions": [
+                "approve",
+                "edit",
+                "reject",
+            ],
+        }
+    )
+
+    if isinstance(review_result,dict):
+        if review_result.get("approved") is False:
+            return {
+                "final_report": "报告未通过人工审核。",
+                "is_complete": False,
+                "status": "cancelled",
+            }
+
+        edited_content = review_result.get("content")
+
+        if isinstance(
+            edited_content, str
+        ) and edited_content.strip():
+            report = edited_content.strip()
+
+        elif isinstance(review_result,str):
+            if review_result.strip():
+                report = review_result.strip()
+
+        return {
+            "final_report": report,
+            "draft_report": report,
+            "status": "running",
+        }
