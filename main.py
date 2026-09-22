@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from time import monotonic
 from html import escape
 import hashlib
@@ -116,12 +117,6 @@ from common.triggers import (
 
 APP_STARTED_AT = monotonic()
 
-app = FastAPI(
-    title="PuzzleResearch",
-    description="PuzzleResearch AI research platform",
-    version="0.1.0",
-)
-
 
 chat_checkpointer = create_checkpointer(
     getattr(settings, "database_url", ""),
@@ -163,6 +158,31 @@ trigger_manager = TriggerManager(
 )
 
 
+@asynccontextmanager
+async def app_lifespan(_: FastAPI):
+    if bool(
+        getattr(
+            settings,
+            "triggers_enabled",
+            True,
+        )
+    ):
+        await trigger_manager.start()
+
+    try:
+        yield
+    finally:
+        await trigger_manager.stop()
+
+
+app = FastAPI(
+    title="PuzzleResearch",
+    description="PuzzleResearch AI research platform",
+    version="0.1.0",
+    lifespan=app_lifespan,
+)
+
+
 async def _execute_trigger(
     trigger: BaseTrigger,
     params: dict[str, Any],
@@ -195,6 +215,8 @@ async def _execute_trigger(
                     or "anonymous"
                 ),
                 "agent_id": trigger.agent_id,
+                "trigger_id": trigger.id,
+                "suppress_trigger_events": True,
             },
         },
     )
@@ -231,6 +253,85 @@ async def emit_trigger_event(
         data,
         source=source,
     )
+
+
+_RUNTIME_TRIGGER_EVENT_TYPES = {
+    "status": "chat.status",
+    "completion": "chat.output",
+    "tool_start": "tool.started",
+    "tool_end": "tool.completed",
+    "tool_error": "tool.failed",
+    "done": "chat.completed",
+    "cancelled": "chat.cancelled",
+    "error": "chat.failed",
+}
+
+
+def _trigger_json_safe(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _trigger_json_safe(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [
+            _trigger_json_safe(item)
+            for item in value
+        ]
+
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
+async def _emit_chat_trigger_event(
+    payload_type: str,
+    payload_data: Any,
+    *,
+    thread_id: str,
+    user_id: str,
+    agent_id: str,
+) -> None:
+    event_type = _RUNTIME_TRIGGER_EVENT_TYPES.get(
+        payload_type
+    )
+
+    if event_type is None:
+        return
+
+    safe_data = _trigger_json_safe(
+        payload_data
+    )
+
+    if isinstance(safe_data, Mapping):
+        event_data = dict(safe_data)
+    else:
+        event_data = {
+            "value": safe_data,
+        }
+
+    event_data.update(
+        {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "payload_type": payload_type,
+            "payload": safe_data,
+        }
+    )
+
+    try:
+        await emit_trigger_event(
+            event_type,
+            event_data,
+            source="chat",
+        )
+    except Exception:
+        # 触发器失败不能影响主聊天流程。
+        pass
 
 
 _active_chat_tasks: dict[str, asyncio.Task] = {}
@@ -755,7 +856,6 @@ class SupportChatResponse(BaseModel):
     timestamp: str
 
 
-# 5. 增加请求模型
 class ScheduledTriggerRequest(BaseModel):
     name: str
     description: str = ""
@@ -832,7 +932,6 @@ def _require_owned_session(
     return principal
 
 
-# 6. 增加触发器权限辅助函数
 def _trigger_for_principal(
     trigger_id: str,
     request: Request,
@@ -2327,6 +2426,29 @@ async def _iter_chat_events(
         else {}
     )
 
+    suppress_trigger_events = bool(
+        configurable.get(
+            "suppress_trigger_events",
+            False,
+        )
+    )
+
+    trigger_user_id = str(
+        configurable.get(
+            "user_id",
+            "anonymous",
+        )
+        or "anonymous"
+    )
+
+    trigger_agent_id = str(
+        configurable.get(
+            "agent_id",
+            "default",
+        )
+        or "default"
+    )
+
     trace_scope = trace_request(
         thread_id,
     )
@@ -2346,12 +2468,6 @@ async def _iter_chat_events(
 
     if current_task is not None:
         _active_chat_tasks[thread_id] = current_task
-
-    configurable = (
-        config.get("configurable", {})
-        if isinstance(config, Mapping)
-        else {}
-    )
 
     cancel_token = await cancellation_manager.create_token(
         thread_id,
@@ -2405,10 +2521,26 @@ async def _iter_chat_events(
                     "value": raw_data,
                 }
 
+            payload_type = str(
+                payload.get(
+                    "type",
+                    "message",
+                )
+            )
+
             await event_emitter.emit(
-                str(payload.get("type", "message")),
+                payload_type,
                 event_data,
             )
+
+            if not suppress_trigger_events:
+                await _emit_chat_trigger_event(
+                    payload_type,
+                    event_data,
+                    thread_id=thread_id,
+                    user_id=trigger_user_id,
+                    agent_id=trigger_agent_id,
+                )
 
         except Exception:
             pass
@@ -4747,7 +4879,6 @@ async def restore_session_version(
     }
 
 
-# 7. 增加创建接口
 @app.post("/api/triggers/scheduled")
 async def create_scheduled_trigger(
     request: Request,
@@ -4858,7 +4989,6 @@ async def create_event_trigger(
     }
 
 
-# 8. 增加管理接口
 @app.get("/api/triggers")
 async def list_triggers(
     request: Request,
@@ -5021,7 +5151,6 @@ async def get_trigger_executions(
     }
 
 
-# 9. 增加 Webhook 接口
 @app.post("/api/webhook/{trigger_id}")
 async def handle_webhook(
     trigger_id: str,

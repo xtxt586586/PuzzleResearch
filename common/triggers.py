@@ -361,17 +361,39 @@ class TriggerManager:
         self.execution_callback = callback
 
     def _ensure_scheduler(self) -> None:
-        if self._scheduler_task is not None:
+        if (
+            self._scheduler_task is not None
+            and not self._scheduler_task.done()
+        ):
             return
 
+        self._scheduler_task = None
+
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return
 
-        self._scheduler_task = loop.create_task(
+        self._scheduler_task = asyncio.create_task(
             self._scheduler_loop()
         )
+
+    async def start(self) -> None:
+        self._ensure_scheduler()
+
+    async def stop(self) -> None:
+        task = self._scheduler_task
+        self._scheduler_task = None
+
+        if task is None or task.done():
+            return
+
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def _scheduler_loop(self) -> None:
         while True:

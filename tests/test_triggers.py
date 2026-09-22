@@ -31,6 +31,7 @@ class TriggerManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self):
+        await self.manager.stop()
         self.directory.cleanup()
 
     async def test_webhook_requires_auth_token(self):
