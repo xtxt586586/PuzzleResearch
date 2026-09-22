@@ -266,6 +266,8 @@ _RUNTIME_TRIGGER_EVENT_TYPES = {
     "tool_start": "tool.started",
     "tool_end": "tool.completed",
     "tool_error": "tool.failed",
+    "research_tree_update": "research.tree_updated",
+    "quality_update": "research.quality_updated",
     "done": "chat.completed",
     "cancelled": "chat.cancelled",
     "error": "chat.failed",
@@ -1546,6 +1548,16 @@ class EvidenceResponse(BaseModel):
     passages: list[EvidencePassageItem] = Field(default_factory=list)
 
 
+class ResearchTreeResponse(BaseModel):
+    thread_id: str
+    tree: dict[str, Any] = Field(
+        default_factory=dict
+    )
+    quality: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+
 def _get_last_user_message(
     messages: list[Message],
 ) -> tuple[int, str]:
@@ -2340,7 +2352,65 @@ def _runtime_event_to_legacy_events(
 
         converted: list[dict[str, Any]] = []
 
-        for tool_event in output.get("tool_events", []):
+        artifacts = output.get(
+            "deepsearch_artifacts",
+            {},
+        )
+
+        if not isinstance(artifacts, Mapping):
+            artifacts = {}
+
+        raw_tree = (
+            output.get("research_tree")
+            or artifacts.get("research_tree")
+        )
+
+        raw_quality = (
+            output.get("quality_summary")
+            or artifacts.get("quality_summary")
+            or {}
+        )
+
+        research_tree = (
+            dict(raw_tree)
+            if isinstance(raw_tree, Mapping)
+            else {}
+        )
+
+        quality_summary = (
+            dict(raw_quality)
+            if isinstance(raw_quality, Mapping)
+            else {}
+        )
+
+        if research_tree:
+            converted.append(
+                {
+                    "type": "research_tree_update",
+                    "data": {
+                        "tree": research_tree,
+                        "quality": quality_summary,
+                        "node": event.name,
+                    },
+                }
+            )
+
+        if quality_summary:
+            converted.append(
+                {
+                    "type": "quality_update",
+                    "data": {
+                        "stage": event.name
+                        or "research",
+                        **quality_summary,
+                    },
+                }
+            )
+
+        for tool_event in output.get(
+            "tool_events",
+            [],
+        ):
             if isinstance(tool_event, Mapping):
                 converted.append(
                     {
@@ -2371,7 +2441,9 @@ def _runtime_event_to_legacy_events(
                 {
                     "type": "completion",
                     "data": {
-                        "content": str(final_report),
+                        "content": str(
+                            final_report
+                        ),
                     },
                 }
             )
@@ -2551,6 +2623,7 @@ async def _iter_chat_events(
             pass
 
     emitted_completion: str | None = None
+    emitted_observability: set[str] = set()
 
     try:
         status_payload = {
@@ -2626,6 +2699,54 @@ async def _iter_chat_events(
             for payload in _runtime_event_to_legacy_events(
                 runtime_event
             ):
+                payload_type = str(
+                    payload.get("type", "")
+                )
+
+                if payload_type in {
+                    "research_tree_update",
+                    "quality_update",
+                }:
+                    payload_data = payload.get(
+                        "data",
+                        {},
+                    )
+
+                    if not isinstance(
+                        payload_data,
+                        Mapping,
+                    ):
+                        payload_data = {
+                            "value": payload_data,
+                        }
+
+                    payload_data = {
+                        **dict(payload_data),
+                        "thread_id": thread_id,
+                    }
+
+                    payload = {
+                        **payload,
+                        "data": payload_data,
+                    }
+
+                    signature = json.dumps(
+                        {
+                            "type": payload_type,
+                            "data": payload_data,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
+
+                    if signature in emitted_observability:
+                        continue
+
+                    emitted_observability.add(
+                        signature
+                    )
+
                 if payload["type"] == "completion":
                     content = str(
                         payload["data"].get(
@@ -3198,6 +3319,49 @@ def _mapping_list(value: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _research_observability_from_snapshot(
+    snapshot: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw_state = snapshot.get("state", {})
+
+    if not isinstance(raw_state, Mapping):
+        raw_state = {}
+
+    artifacts = raw_state.get(
+        "deepsearch_artifacts",
+        {},
+    )
+
+    if not isinstance(artifacts, Mapping):
+        artifacts = {}
+
+    raw_tree = (
+        raw_state.get("research_tree")
+        or artifacts.get("research_tree")
+        or {}
+    )
+
+    raw_quality = (
+        raw_state.get("quality_summary")
+        or artifacts.get("quality_summary")
+        or {}
+    )
+
+    tree = (
+        dict(raw_tree)
+        if isinstance(raw_tree, Mapping)
+        else {}
+    )
+
+    quality = (
+        dict(raw_quality)
+        if isinstance(raw_quality, Mapping)
+        else {}
+    )
+
+    return tree, quality
+
+
 def _normalize_evidence_source(
     item: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -3311,6 +3475,57 @@ async def get_session_evidence_api(
         ) from exc
 
     return _evidence_from_snapshot(snapshot)
+
+
+@app.get(
+    "/api/sessions/{thread_id}/research-tree",
+    response_model=ResearchTreeResponse,
+)
+async def get_session_research_tree_api(
+    thread_id: str,
+    request: Request,
+) -> ResearchTreeResponse:
+    principal = _resolve_request_principal(request)
+
+    try:
+        snapshot = _session_manager_with_owner(
+            "get_state",
+            thread_id,
+            owner_id=principal.user_id,
+        )
+
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    except SessionOwnerError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+
+    except (
+        SessionManagerError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    tree, quality = (
+        _research_observability_from_snapshot(
+            snapshot
+        )
+    )
+
+    return ResearchTreeResponse(
+        thread_id=thread_id,
+        tree=tree,
+        quality=quality,
+    )
 
 
 def _run_evidence_summary(
