@@ -62,6 +62,11 @@ from common.metrics import (
     RunMetrics,
     metrics_registry,
 )
+from common.tracing import (
+    SpanKind,
+    SpanStatus,
+    trace_request,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -1411,7 +1416,13 @@ async def public_config() -> PublicConfigResponse:
             mcp_enabled=False,
             sandbox_mode="unavailable",
             prometheus_enabled=False,
-            tracing_enabled=False,
+            tracing_enabled=bool(
+                getattr(
+                    settings,
+                    "enable_tracing",
+                    False,
+                )
+            ),
         ),
         streaming=PublicConfigStreaming(
             chat=PublicConfigStreamEndpoint(
@@ -1817,6 +1828,27 @@ async def _iter_chat_events(
         thread_id: str,
         config: dict[str, Any]
 ) -> AsyncIterator[dict[str, Any]]:
+    configurable = (
+        config.get("configurable", {})
+        if isinstance(config, Mapping)
+        else {}
+    )
+
+    trace_scope = trace_request(
+        thread_id,
+    )
+    trace_context = trace_scope.__enter__()
+    trace_root_closed = False
+
+    if trace_context is not None:
+        trace_context.start_span(
+            "agent_run",
+            SpanKind.NODE,
+            model=str(
+                configurable.get("model", "")
+            ),
+        )
+
     current_task = asyncio.current_task()
 
     if current_task is not None:
@@ -1920,6 +1952,48 @@ async def _iter_chat_events(
                 runtime_event.name,
             )
 
+            if trace_context is not None:
+                event_name = (
+                    runtime_event.name
+                    or runtime_event.event
+                )
+
+                if runtime_event.event == "on_tool_start":
+                    span_kind = SpanKind.TOOL_CALL
+                elif runtime_event.event in {
+                    "on_chat_model_start",
+                    "on_chat_model_stream",
+                    "on_llm_start",
+                    "on_llm_end",
+                }:
+                    span_kind = SpanKind.LLM_CALL
+                elif "chain" in runtime_event.event:
+                    span_kind = SpanKind.NODE
+                else:
+                    span_kind = SpanKind.CUSTOM
+
+                span = trace_context.start_span(
+                    event_name,
+                    span_kind,
+                    model=str(
+                        configurable.get("model", "")
+                    ),
+                    attributes={
+                        "event": runtime_event.event,
+                    },
+                )
+
+                event_data = runtime_event.data
+
+                if runtime_event.event.endswith("_error"):
+                    error_text = str(event_data)
+                    trace_context.end_span(
+                        SpanStatus.ERROR,
+                        error_text,
+                    )
+                else:
+                    trace_context.end_span()
+
             for payload in _runtime_event_to_legacy_events(
                 runtime_event
             ):
@@ -1956,6 +2030,13 @@ async def _iter_chat_events(
             cancelled=False,
         )
 
+        if (
+            trace_context is not None
+            and not trace_root_closed
+        ):
+            trace_context.end_span()
+            trace_root_closed = True
+
         await publish_event(done_payload)
         yield done_payload
 
@@ -1965,6 +2046,16 @@ async def _iter_chat_events(
         run_metrics.finish(
             cancelled=True,
         )
+
+        if (
+            trace_context is not None
+            and not trace_root_closed
+        ):
+            trace_context.end_span(
+                SpanStatus.CANCELLED,
+                "任务已取消",
+            )
+            trace_root_closed = True
 
         cancelled_payload = {
             "type": "cancelled",
@@ -1984,6 +2075,16 @@ async def _iter_chat_events(
         run_metrics.finish(
             cancelled=False,
         )
+
+        if (
+            trace_context is not None
+            and not trace_root_closed
+        ):
+            trace_context.end_span(
+                SpanStatus.ERROR,
+                str(exc),
+            )
+            trace_root_closed = True
 
         error_payload = {
             "type": "error",
@@ -2008,6 +2109,19 @@ async def _iter_chat_events(
             )
 
         _forget_thread_owner(thread_id)
+
+        if (
+            trace_context is not None
+            and not trace_root_closed
+        ):
+            trace_context.end_span()
+            trace_root_closed = True
+
+        trace_scope.__exit__(
+            None,
+            None,
+            None,
+        )
 
 
 async def _iter_legacy_chat_stream(
@@ -2745,6 +2859,116 @@ async def get_run_metrics_api(
             thread_id,
         ),
     )
+
+
+@app.get("/api/traces/{thread_id}")
+async def get_traces_api(
+    thread_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    if not getattr(
+        settings,
+        "enable_tracing",
+        False,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Tracing 未启用。",
+        )
+
+    principal = _resolve_request_principal(
+        request,
+    )
+    _assert_thread_owner(
+        thread_id,
+        principal,
+    )
+
+    from common.tracing import get_trace
+
+    trace = get_trace(thread_id)
+
+    if trace is None:
+        raise HTTPException(
+            status_code=404,
+            detail="未找到线程追踪记录。",
+        )
+
+    return trace
+
+
+@app.get("/api/traces/{thread_id}/summary")
+async def get_trace_summary_api(
+    thread_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    if not getattr(
+        settings,
+        "enable_tracing",
+        False,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Tracing 未启用。",
+        )
+
+    principal = _resolve_request_principal(
+        request,
+    )
+    _assert_thread_owner(
+        thread_id,
+        principal,
+    )
+
+    from common.tracing import get_trace_summary
+
+    summary = get_trace_summary(
+        thread_id,
+    )
+
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail="未找到线程追踪记录。",
+        )
+
+    return summary
+
+
+@app.get("/api/traces/{thread_id}/all")
+async def get_all_traces_api(
+    thread_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    if not getattr(
+        settings,
+        "enable_tracing",
+        False,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Tracing 未启用。",
+        )
+
+    principal = _resolve_request_principal(
+        request,
+    )
+    _assert_thread_owner(
+        thread_id,
+        principal,
+    )
+
+    from common.tracing import get_all_traces
+
+    traces = get_all_traces(
+        thread_id,
+    )
+
+    return {
+        "thread_id": thread_id,
+        "count": len(traces),
+        "traces": traces,
+    }
 
 
 

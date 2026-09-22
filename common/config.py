@@ -49,6 +49,9 @@ class Settings(BaseSettings):
         description="可信用户身份请求头。",
     )
 
+    enable_tracing: bool = False
+    trace_buffer_size: int = 1000
+
     # ========== DeepSeek 配置 ==========
 
     deepseek_api_key: str = ""
