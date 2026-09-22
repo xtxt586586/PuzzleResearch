@@ -130,6 +130,13 @@ class Settings(BaseSettings):
     screenshot_retention_hours: int = 24
     screenshot_max_bytes: int = 10 * 1024 * 1024
 
+    # ========== 触发器配置 ==========
+
+    triggers_enabled: bool = True
+    trigger_store_path: str = "./data/triggers.json"
+    trigger_poll_seconds: float = 1.0
+    trigger_history_limit: int = 100
+
     # ========== Agent 安全配置 ==========
 
     tool_approval: bool = False

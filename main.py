@@ -103,6 +103,15 @@ from tools.screenshot_store import (
 from tools.browser_session import (
     browser_sessions,
 )
+from common.triggers import (
+    BaseTrigger,
+    EventTrigger,
+    ScheduledTrigger,
+    TriggerManager,
+    TriggerStatus,
+    TriggerType,
+    WebhookTrigger,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -114,9 +123,8 @@ app = FastAPI(
 )
 
 
-
 chat_checkpointer = create_checkpointer(
-    getattr(settings,"database_url",""),
+    getattr(settings, "database_url", ""),
     fallback_to_memory=True,
 )
 
@@ -129,9 +137,104 @@ session_manager = SessionManager(
     chat_checkpointer,
 )
 
-_active_chat_tasks: dict[str,asyncio.Task] = {}
-_thread_owners: dict[str, str] = {}
+# 4. 初始化触发器管理器
+trigger_manager = TriggerManager(
+    getattr(
+        settings,
+        "trigger_store_path",
+        "./data/triggers.json",
+    ),
+    poll_seconds=float(
+        getattr(
+            settings,
+            "trigger_poll_seconds",
+            1.0,
+        )
+        or 1.0
+    ),
+    history_limit=int(
+        getattr(
+            settings,
+            "trigger_history_limit",
+            100,
+        )
+        or 100
+    ),
+)
 
+
+async def _execute_trigger(
+    trigger: BaseTrigger,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    thread_id = (
+        f"trigger_{trigger.id}_"
+        f"{uuid.uuid4().hex}"
+    )
+
+    task = trigger.task
+
+    if params:
+        task += (
+            "\n\n触发器参数：\n"
+            + json.dumps(
+                params,
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+
+    result = await chat_runtime.ainvoke(
+        task,
+        thread_id=thread_id,
+        config={
+            "configurable": {
+                "thread_id": thread_id,
+                "user_id": (
+                    trigger.user_id
+                    or "anonymous"
+                ),
+                "agent_id": trigger.agent_id,
+            },
+        },
+    )
+
+    output = ""
+
+    if isinstance(result, Mapping):
+        output = str(
+            result.get("final_report")
+            or result.get("draft_report")
+            or ""
+        ).strip()
+
+    return {
+        "status": "completed",
+        "thread_id": thread_id,
+        "output": output,
+    }
+
+
+trigger_manager.set_execution_callback(
+    _execute_trigger
+)
+
+
+async def emit_trigger_event(
+    event_type: str,
+    data: dict[str, Any],
+    *,
+    source: str | None = None,
+) -> list[Any]:
+    return await trigger_manager.emit_event(
+        event_type,
+        data,
+        source=source,
+    )
+
+
+_active_chat_tasks: dict[str, asyncio.Task] = {}
+_thread_owners: dict[str, str] = {}
 
 
 configured_api_key = (
@@ -144,15 +247,14 @@ configured_api_key = (
         or ""
     ).strip()
     or str(
-    getattr(
-        settings,
-        "api_key",
-        "",
-    )
-    or ""
-).strip()
+        getattr(
+            settings,
+            "api_key",
+            "",
+        )
+        or ""
+    ).strip()
 )
-
 
 
 _PUBLIC_AUTH_PATHS = {
@@ -233,7 +335,6 @@ def _extra_trusted_user_id(request: Request) -> str:
         or request.headers.get("user-id")
         or ""
     ).strip()
-
 
 
 @app.middleware("http")
@@ -330,7 +431,6 @@ def _audio_max_bytes() -> int:
     )
 
 
-
 class SessionSummaryResponse(BaseModel):
     thread_id: str
     status: str
@@ -351,17 +451,17 @@ class SessionListResponse(BaseModel):
     sessions: list[SessionSummaryResponse]
 
 
-
 class SessionStateResponse(BaseModel):
     thread_id: str
     status: str
-    state: dict[str,Any]
+    state: dict[str, Any]
     interrupts: list[Any]
     checkpoint_id: str | None = None
 
 
 class SessionResumeRequest(BaseModel):
     resume_value: Any = True
+
 
 class InterruptResumeRequest(BaseModel):
     approved: bool | None = None
@@ -427,18 +527,19 @@ class ToolRegistryState(BaseModel):
     total_calls: int
     total_successes: int
     overall_success_rate: float
-    most_used: list[dict[str,Any]]
-    by_type: dict[str,int]
+    most_used: list[dict[str, Any]]
+    by_type: dict[str, int]
     tags: list[str]
 
 
 class ToolRegistryTool(BaseModel):
     name: str
     description: str
-    parameters: list[dict[str,Any]]
+    parameters: list[dict[str, Any]]
     enabled: bool
     source: str
     tool_type: str
+
 
 class ToolRegistryResponse(BaseModel):
     stats: ToolRegistryState
@@ -470,7 +571,6 @@ class SearchProviderResponse(BaseModel):
 class SearchProviderResetResponse(BaseModel):
     reset: bool
     message: str
-
 
 
 class PublicConfigDefaults(BaseModel):
@@ -532,26 +632,25 @@ class CancelRequest(BaseModel):
     reason: str = "用户取消"
 
 
-
 class AgentUpsertRequest(BaseModel):
     id: str | None = None
     name: str
     description: str = ""
     system_prompt: str = ""
     model: str = ""
-    enabled_tools: dict[str,bool] = Field(
+    enabled_tools: dict[str, bool] = Field(
         default_factory=dict
     )
-    mcp_servers: dict[str,Any] | None = None
-    metadata: dict[str,Any] = Field(
+    mcp_servers: dict[str, Any] | None = None
+    metadata: dict[str, Any] = Field(
         default_factory=dict
     )
 
     @field_validator("id")
     @classmethod
     def _normalize_id(
-            cls,
-            value: str | None,
+        cls,
+        value: str | None,
     ) -> str | None:
         if value is None:
             return None
@@ -562,8 +661,8 @@ class AgentUpsertRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def _normalize_name(
-            cls,
-            value: str,
+        cls,
+        value: str,
     ) -> str:
         normalized = value.strip()
 
@@ -579,16 +678,15 @@ class AgentRecordResponse(BaseModel):
     description: str
     system_prompt: str
     model: str
-    enabled_tools: dict[str,bool]
-    mcp_servers: dict[str,Any] | None
-    metadata: dict[str,Any]
+    enabled_tools: dict[str, bool]
+    mcp_servers: dict[str, Any] | None
+    metadata: dict[str, Any]
     created_at: str
     updated_at: str
 
 
 class AgentListsResponse(BaseModel):
     agents: list[AgentRecordResponse]
-
 
 
 class SearchCacheStateResponse(BaseModel):
@@ -657,6 +755,62 @@ class SupportChatResponse(BaseModel):
     timestamp: str
 
 
+# 5. 增加请求模型
+class ScheduledTriggerRequest(BaseModel):
+    name: str
+    description: str = ""
+    schedule: str
+    timezone: str = "Asia/Shanghai"
+    run_immediately: bool = False
+    agent_id: str = "default"
+    task: str
+    task_params: dict[str, Any] = Field(
+        default_factory=dict
+    )
+    tags: list[str] = Field(
+        default_factory=list
+    )
+    user_id: str | None = None
+
+
+class WebhookTriggerRequest(BaseModel):
+    name: str
+    description: str = ""
+    agent_id: str = "default"
+    task: str
+    task_params: dict[str, Any] = Field(
+        default_factory=dict
+    )
+    http_methods: list[str] = Field(
+        default_factory=lambda: ["POST"]
+    )
+    require_auth: bool = False
+    rate_limit: int | None = None
+    tags: list[str] = Field(
+        default_factory=list
+    )
+    user_id: str | None = None
+
+
+class EventTriggerRequest(BaseModel):
+    name: str
+    description: str = ""
+    event_type: str
+    event_source: str | None = None
+    event_filters: dict[str, Any] = Field(
+        default_factory=dict
+    )
+    debounce_seconds: int = 0
+    agent_id: str = "default"
+    task: str
+    task_params: dict[str, Any] = Field(
+        default_factory=dict
+    )
+    tags: list[str] = Field(
+        default_factory=list
+    )
+    user_id: str | None = None
+
 
 def _require_owned_session(
     thread_id: str,
@@ -678,12 +832,40 @@ def _require_owned_session(
     return principal
 
 
+# 6. 增加触发器权限辅助函数
+def _trigger_for_principal(
+    trigger_id: str,
+    request: Request,
+) -> tuple[Any, Principal]:
+    principal = _resolve_request_principal(
+        request
+    )
+    trigger = trigger_manager.get(
+        trigger_id
+    )
 
+    if trigger is None:
+        raise HTTPException(
+            status_code=404,
+            detail="触发器不存在。",
+        )
+
+    if (
+        configured_api_key
+        and trigger.user_id
+        and trigger.user_id != principal.user_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="当前用户无权访问该触发器。",
+        )
+
+    return trigger, principal
 
 
 def _normalize_search_mode(
-        search_mode: SearchMode | Mapping[str,Any] | str | None,
-) -> dict[str,Any]:
+    search_mode: SearchMode | Mapping[str, Any] | str | None,
+) -> dict[str, Any]:
     if isinstance(search_mode, SearchMode):
         use_web = search_mode.useWebSearch
         use_agent = search_mode.useAgent
@@ -693,25 +875,25 @@ def _normalize_search_mode(
         use_web = bool(
             search_mode.get(
                 "useWebSearch",
-                search_mode.get("use_web",False)
+                search_mode.get("use_web", False)
             )
         )
         use_agent = bool(
             search_mode.get(
                 "useAgent",
-                search_mode.get("use_agent",False)
+                search_mode.get("use_agent", False)
             )
         )
         use_deep = bool(
             search_mode.get(
                 "useDeepSearch",
-                search_mode.get("use_deep",False)
+                search_mode.get("use_deep", False)
             )
         )
 
         if not (use_web or use_agent or use_deep):
             raw_mode = str(
-                search_mode.get("mode","")
+                search_mode.get("mode", "")
             ).strip().lower()
 
             if raw_mode == "web":
@@ -722,7 +904,7 @@ def _normalize_search_mode(
                 use_agent = True
                 use_deep = True
 
-    elif isinstance(search_mode,str):
+    elif isinstance(search_mode, str):
         mode = search_mode.strip().lower()
 
         use_web = mode in {
@@ -771,7 +953,7 @@ def _normalize_search_mode(
 
 
 def _coerce_search_mode_input(
-        value: Any,
+    value: Any,
 ) -> SearchMode | None:
     if value is None:
         return None
@@ -788,12 +970,10 @@ def _coerce_search_mode_input(
     )
 
 
-
 def _resolve_request_principal(
-        request: Request,
-        requested_user_id: str | None = None,
+    request: Request,
+    requested_user_id: str | None = None,
 ) -> Principal:
-
     if getattr(
         request.state,
         "api_key_authenticated",
@@ -855,7 +1035,6 @@ def _resolve_request_principal(
     if configured_api_key:
         user_id = header_user_id or "header"
     else:
-
         user_id = (
             requested_user_id
             or header_user_id
@@ -876,21 +1055,21 @@ def _resolve_request_principal(
 
 
 def _register_thread_owner(
-        thread_id: str,
-        principal: Principal,
+    thread_id: str,
+    principal: Principal,
 ) -> None:
     _thread_owners[thread_id] = principal.user_id
 
 
 def _forget_thread_owner(
-        thread_id: str,
+    thread_id: str,
 ) -> None:
     _thread_owners.pop(thread_id, None)
 
 
 def _assert_thread_owner(
-        thread_id: str,
-        principal: Principal,
+    thread_id: str,
+    principal: Principal,
 ) -> None:
     registered_owner = _thread_owners.get(thread_id)
 
@@ -908,8 +1087,6 @@ def _assert_thread_owner(
             principal.user_id,
         )
     except SessionNotFoundError:
-        # Keep anonymous event-stream fixtures and local development
-        # compatible when no persisted session exists yet.
         if principal.is_anonymous:
             return
         raise HTTPException(
@@ -990,8 +1167,6 @@ async def _cancel_active_thread(
                 thread_id=thread_id,
             )
         except Exception:
-            # Cancellation must still succeed when
-            # no checkpoint is currently available.
             pass
 
     if task_active:
@@ -1000,12 +1175,11 @@ async def _cancel_active_thread(
     return True
 
 
-
 def _session_manager_with_owner(
-        method_name: str,
-        *args: Any,
-        owner_id: str,
-        **kwargs: Any,
+    method_name: str,
+    *args: Any,
+    owner_id: str,
+    **kwargs: Any,
 ) -> Any:
     method = getattr(session_manager, method_name)
 
@@ -1027,7 +1201,6 @@ def _session_manager_with_owner(
         kwargs["owner_id"] = owner_id
 
     return method(*args, **kwargs)
-
 
 
 def _rag_collection_for_request(
@@ -1164,7 +1337,6 @@ def _support_reply_from_result(
     return ""
 
 
-
 class ChatRequest(BaseModel):
     messages: list[Message]
     stream: bool = True
@@ -1177,11 +1349,10 @@ class ChatRequest(BaseModel):
     @field_validator("search_mode", mode="before")
     @classmethod
     def _coerce_search_mode(
-            cls,
-            value: Any,
+        cls,
+        value: Any,
     ) -> SearchMode | None:
         return _coerce_search_mode_input(value)
-
 
 
 class ResearchRequest(BaseModel):
@@ -1195,8 +1366,8 @@ class ResearchRequest(BaseModel):
     @field_validator("search_mode", mode="before")
     @classmethod
     def _coerce_search_mode(
-            cls,
-            value: Any,
+        cls,
+        value: Any,
     ) -> SearchMode | None:
         return _coerce_search_mode_input(value)
 
@@ -1266,16 +1437,15 @@ class EvidencePassageItem(BaseModel):
 class EvidenceResponse(BaseModel):
     sources: list[EvidenceSource] = Field(default_factory=list)
     claims: list[EvidenceClaim] = Field(default_factory=list)
-    quality_summary: dict[str,Any] = Field(default_factory=dict)
+    quality_summary: dict[str, Any] = Field(default_factory=dict)
     fetched_pages: list[FetchPageItem] = Field(default_factory=list)
     passages: list[EvidencePassageItem] = Field(default_factory=list)
 
 
-
 def _get_last_user_message(
-        messages: list[Message],
-) -> tuple[int,str]:
-    for index in range(len(messages) - 1,-1,-1):
+    messages: list[Message],
+) -> tuple[int, str]:
+    for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
 
         if message.role.strip().lower() == "user":
@@ -1287,7 +1457,7 @@ def _get_last_user_message(
                     detail="用户消息不能为空。"
                 )
 
-            return index,content
+            return index, content
 
     raise HTTPException(
         status_code=400,
@@ -1296,7 +1466,7 @@ def _get_last_user_message(
 
 
 def _to_runtime_message(
-        messages: list[Message]
+    messages: list[Message]
 ) -> list[Any]:
     result: list[Any] = []
 
@@ -1320,16 +1490,16 @@ def _to_runtime_message(
 
 
 def _build_chat_config(
-        *,
-        thread_id: str,
-        model: str,
-        search_mode: dict[str,Any],
-        agent_id: str,
-        user_id: str,
-        images: list[ImagePayload] | None,
-        agent_profile: AgentProfile,
-        model_override: str | None,
-) -> dict[str,Any]:
+    *,
+    thread_id: str,
+    model: str,
+    search_mode: dict[str, Any],
+    agent_id: str,
+    user_id: str,
+    images: list[ImagePayload] | None,
+    agent_profile: AgentProfile,
+    model_override: str | None,
+) -> dict[str, Any]:
     return {
         "configurable": {
             "thread_id": thread_id,
@@ -1378,13 +1548,13 @@ def _model_options() -> list[str]:
     return options
 
 
-def _tool_registry_snapshot() -> dict[str,Any]:
+def _tool_registry_snapshot() -> dict[str, Any]:
     registry = create_default_registry(
         include_browser=True,
     )
     schemas = registry.describe_tools()
 
-    tools: list[dict[str,Any]] = []
+    tools: list[dict[str, Any]] = []
 
     for schema in schemas:
         tools.append(
@@ -1414,9 +1584,8 @@ def _tool_registry_snapshot() -> dict[str,Any]:
     }
 
 
-
 def _resolve_agent_runtime(
-        agent_id: str,
+    agent_id: str,
 ) -> tuple[
     agent_store.AgentRecord,
     AgentProfile,
@@ -1455,12 +1624,11 @@ def _resolve_agent_runtime(
             detail=str(exc),
         ) from exc
 
-    return record,profile
-
+    return record, profile
 
 
 def _search_provider_snapshots() -> list[
-    dict[str,Any]
+    dict[str, Any]
 ]:
     manager = SearchManager(
         runtime_state=get_default_search_runtime_state()
@@ -1475,9 +1643,9 @@ def _search_provider_snapshots() -> list[
         settings.search_engines_list
     )
 
-    snapshots: list[dict[str,Any]] = []
+    snapshots: list[dict[str, Any]] = []
 
-    for name,provider in manager.providers.items():
+    for name, provider in manager.providers.items():
         provider_name = str(name).strip()
 
         try:
@@ -1495,7 +1663,6 @@ def _search_provider_snapshots() -> list[
                 reason = "未在当前搜索配置中启用。"
             else:
                 reason = "Provider 不可用。"
-
 
         stats = provider_stats.get(
             provider_name,
@@ -1520,9 +1687,8 @@ def _search_provider_snapshots() -> list[
     return snapshots
 
 
-
 def _agent_response(
-        record: agent_store.AgentRecord,
+    record: agent_store.AgentRecord,
 ) -> AgentRecordResponse:
     return AgentRecordResponse.model_validate(
         record.model_dump(mode="json")
@@ -1530,9 +1696,9 @@ def _agent_response(
 
 
 def _record_from_request(
-        payload: AgentUpsertRequest,
-        *,
-        agent_id: str
+    payload: AgentUpsertRequest,
+    *,
+    agent_id: str
 ) -> agent_store.AgentRecord:
     timestamp = _timestamp()
 
@@ -1556,9 +1722,8 @@ def _record_from_request(
     )
 
 
-
 def _raise_agent_store_error(
-        error: agent_store.AgentStoreError,
+    error: agent_store.AgentStoreError,
 ) -> None:
     raise HTTPException(
         status_code=500,
@@ -1567,7 +1732,7 @@ def _raise_agent_store_error(
 
 
 @app.get("/")
-async def root() -> dict[str,Any]:
+async def root() -> dict[str, Any]:
     return {
         "status": "healthy",
         "service": "PuzzleResearch Research Agent",
@@ -1575,9 +1740,8 @@ async def root() -> dict[str,Any]:
     }
 
 
-
 @app.get("/health")
-async def health() -> dict[str,Any]:
+async def health() -> dict[str, Any]:
     return {
         "status": "healthy",
         "database": (
@@ -1655,7 +1819,6 @@ async def agent_health() -> AgentHealthResponse:
     except agent_store.AgentStoreError as exc:
         _raise_agent_store_error(exc)
 
-
     return AgentHealthResponse(
         agents_count=len(records),
         agent_ids=[
@@ -1668,7 +1831,7 @@ async def agent_health() -> AgentHealthResponse:
         enhanced_tool_discovery_enabled=False,
         enhanced_tool_discovery_recursive=False,
         rag_enabled=bool(
-            getattr(settings,"rag_enabled",False)
+            getattr(settings, "rag_enabled", False)
         ),
         search_strategy="fallback",
         search_engines=list(
@@ -1690,12 +1853,13 @@ async def get_tool_registry_api() -> ToolRegistryResponse:
         _tool_registry_snapshot()
     )
 
+
 @app.post(
     "/api/tools/registry/refresh",
     response_model=ToolRegistryRefreshResponse,
 )
 async def refresh_tool_registry_api(
-        reset: bool = False,
+    reset: bool = False,
 ) -> ToolRegistryRefreshResponse:
     snapshot = _tool_registry_snapshot()
 
@@ -1718,6 +1882,7 @@ async def get_search_provider_api() -> SearchProviderResponse:
             for item in _search_provider_snapshots()
         ]
     )
+
 
 @app.post(
     "/api/search/providers/reset",
@@ -1806,7 +1971,7 @@ async def list_agents_api() -> AgentListsResponse:
     response_model=AgentRecordResponse,
 )
 async def get_agent_api(
-        agent_id: str,
+    agent_id: str,
 ) -> AgentRecordResponse:
     try:
         record = agent_store.get_agent(agent_id)
@@ -1822,19 +1987,18 @@ async def get_agent_api(
 
     return _agent_response(record)
 
+
 @app.post(
     "/api/agents",
     response_model=AgentRecordResponse,
     status_code=201,
 )
 async def create_agent_api(
-        payload: AgentUpsertRequest,
+    payload: AgentUpsertRequest,
 ) -> AgentRecordResponse:
     agent_id = payload.id or (
         f"agent_{uuid.uuid4().hex[:10]}"
     )
-
-
 
     record = _record_from_request(
         payload,
@@ -1863,8 +2027,8 @@ async def create_agent_api(
     response_model=AgentRecordResponse,
 )
 async def update_agent_api(
-        agent_id: str,
-        payload: AgentUpsertRequest,
+    agent_id: str,
+    payload: AgentUpsertRequest,
 ) -> AgentRecordResponse:
     normalized_id = agent_id.strip()
 
@@ -1940,13 +2104,12 @@ async def update_agent_api(
     return _agent_response(updated)
 
 
-
 @app.delete(
     "/api/agents/{agent_id}"
 )
 async def delete_agent_api(
-        agent_id: str,
-) -> dict[str,str]:
+    agent_id: str,
+) -> dict[str, str]:
     normalized_id = agent_id.strip()
 
     try:
@@ -1975,15 +2138,12 @@ async def delete_agent_api(
     }
 
 
-
-
-
 def _runtime_event_to_legacy_events(
-        event: RuntimeEvent,
-) -> list[dict[str,Any]]:
+    event: RuntimeEvent,
+) -> list[dict[str, Any]]:
     event_data = event.data
 
-    if isinstance(event_data,Mapping):
+    if isinstance(event_data, Mapping):
         data = dict(event_data)
 
     else:
@@ -2053,9 +2213,9 @@ def _runtime_event_to_legacy_events(
 
     if event.event == "on_chat_model_stream":
         chunk = data.get("chunk")
-        content = getattr(chunk,"content",None)
+        content = getattr(chunk, "content", None)
 
-        if content is None and isinstance(chunk,Mapping):
+        if content is None and isinstance(chunk, Mapping):
             content = chunk.get("content")
 
         if content:
@@ -2069,15 +2229,15 @@ def _runtime_event_to_legacy_events(
             ]
 
     if event.event == "on_chain_end":
-        output = data.get("output",data)
+        output = data.get("output", data)
 
-        if not isinstance(output,Mapping):
+        if not isinstance(output, Mapping):
             return []
 
-        converted: list[dict[str,Any]] = []
+        converted: list[dict[str, Any]] = []
 
-        for tool_event in output.get("tool_events",[]):
-            if isinstance(tool_event,Mapping):
+        for tool_event in output.get("tool_events", []):
+            if isinstance(tool_event, Mapping):
                 converted.append(
                     {
                         "type": "tool",
@@ -2098,10 +2258,9 @@ def _runtime_event_to_legacy_events(
             )
 
         final_report = (
-                output.get("final_report")
-                or output.get("draft_report")
+            output.get("final_report")
+            or output.get("draft_report")
         )
-
 
         if final_report:
             converted.append(
@@ -2119,23 +2278,24 @@ def _runtime_event_to_legacy_events(
 
 
 def _format_legacy_event(
-        payload: dict[str,Any]
+    payload: dict[str, Any]
 ) -> str:
     return (
         "0:"
         + json.dumps(
             payload,
-        ensure_ascii=False,
+            ensure_ascii=False,
             separators=(",", ":"),
         )
         + "\n"
     )
 
+
 def _format_sse_event(
-        *,
-        event: str,
-        data: Any,
-        event_id: int,
+    *,
+    event: str,
+    data: Any,
+    event_id: int,
 ) -> str:
     payload = {
         "type": event,
@@ -2155,11 +2315,11 @@ def _format_sse_event(
 
 
 async def _iter_chat_events(
-        *,
-        user_input: str,
-        history: list[Any],
-        thread_id: str,
-        config: dict[str, Any]
+    *,
+    user_input: str,
+    history: list[Any],
+    thread_id: str,
+    config: dict[str, Any]
 ) -> AsyncIterator[dict[str, Any]]:
     configurable = (
         config.get("configurable", {})
@@ -2251,7 +2411,6 @@ async def _iter_chat_events(
             )
 
         except Exception:
-            # 事件订阅失败不应影响主对话流。
             pass
 
     emitted_completion: str | None = None
@@ -2458,14 +2617,14 @@ async def _iter_chat_events(
 
 
 async def _iter_legacy_chat_stream(
-        **kwargs: Any
+    **kwargs: Any
 ) -> AsyncIterator[str]:
     async for payload in _iter_chat_events(**kwargs):
         yield _format_legacy_event(payload)
 
 
 async def _iter_sse_chat_stream(
-        **kwargs: Any
+    **kwargs: Any
 ) -> AsyncIterator[str]:
     yield "retry: 2000\n\n"
 
@@ -2677,9 +2836,9 @@ async def get_active_tasks(
     response_model=SessionListResponse,
 )
 async def list_sessions_api(
-        request: Request,
-        limit: int = 50,
-        status: str | None = None,
+    request: Request,
+    limit: int = 50,
+    status: str | None = None,
 ) -> SessionListResponse:
     principal = _resolve_request_principal(request)
 
@@ -2713,8 +2872,8 @@ async def list_sessions_api(
     response_model=SessionSummaryResponse
 )
 async def get_session_api(
-        thread_id: str,
-        request: Request,
+    thread_id: str,
+    request: Request,
 ) -> SessionSummaryResponse:
     principal = _resolve_request_principal(request)
     try:
@@ -2752,8 +2911,8 @@ async def get_session_api(
     response_model=SessionStateResponse,
 )
 async def get_session_state_api(
-        thread_id: str,
-        request: Request,
+    thread_id: str,
+    request: Request,
 ) -> SessionStateResponse:
     principal = _resolve_request_principal(request)
     try:
@@ -2788,13 +2947,14 @@ async def get_session_state_api(
         state
     )
 
+
 @app.delete(
     "/api/sessions/{thread_id}",
 )
 async def delete_session_api(
-        thread_id: str,
-        request: Request,
-) -> dict[str,str]:
+    thread_id: str,
+    request: Request,
+) -> dict[str, str]:
     principal = _resolve_request_principal(request)
 
     try:
@@ -2827,14 +2987,15 @@ async def delete_session_api(
         "thread_id": thread_id,
     }
 
+
 @app.post(
     "/api/sessions/{thread_id}/resume"
 )
 async def resume_session_api(
-        thread_id: str,
-        request: Request,
-        payload: SessionResumeRequest,
-) -> dict[str,Any]:
+    thread_id: str,
+    request: Request,
+    payload: SessionResumeRequest,
+) -> dict[str, Any]:
     principal = _resolve_request_principal(request)
     resume_value = (
         payload.resume_value
@@ -2883,29 +3044,29 @@ async def resume_session_api(
         "thread_id": thread_id,
         "result": (
             dict(result)
-            if isinstance(result,Mapping)
+            if isinstance(result, Mapping)
             else str(result)
         ),
     }
 
 
-def _mapping_list(value: Any) -> list[dict[str,Any]]:
-    if not isinstance(value,list):
+def _mapping_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
         return []
 
     return [
         dict(item)
         for item in value
-        if isinstance(item,Mapping)
+        if isinstance(item, Mapping)
     ]
 
 
 def _normalize_evidence_source(
-        item: Mapping[str,Any]
-) -> dict[str,Any]:
+    item: Mapping[str, Any]
+) -> dict[str, Any]:
     return {
-        "title": str(item.get("title","")),
-        "url": str(item.get("url","")),
+        "title": str(item.get("title", "")),
+        "url": str(item.get("url", "")),
         "rawUrl": (
             item.get("rawUrl")
             or item.get("rawurl")
@@ -2920,11 +3081,11 @@ def _normalize_evidence_source(
 
 
 def _evidence_from_snapshot(
-        snapshot: Mapping[str,Any],
+    snapshot: Mapping[str, Any],
 ) -> EvidenceResponse:
-    raw_state = snapshot.get("state",{})
+    raw_state = snapshot.get("state", {})
 
-    if not isinstance(raw_state,Mapping):
+    if not isinstance(raw_state, Mapping):
         raw_state = {}
 
     artifacts = raw_state.get(
@@ -2932,7 +3093,7 @@ def _evidence_from_snapshot(
         {},
     )
 
-    if not isinstance(artifacts,Mapping):
+    if not isinstance(artifacts, Mapping):
         artifacts = {}
 
     raw_sources = (
@@ -2946,7 +3107,7 @@ def _evidence_from_snapshot(
         for item in _mapping_list(raw_sources)
     ]
     claims = _mapping_list(
-        artifacts.get("claims",[])
+        artifacts.get("claims", [])
     )
 
     quality_summary = (
@@ -2955,15 +3116,15 @@ def _evidence_from_snapshot(
         or {}
     )
 
-    if not isinstance(quality_summary,Mapping):
+    if not isinstance(quality_summary, Mapping):
         quality_summary = {}
 
     fetched_pages = _mapping_list(
-        artifacts.get("fetched_pages",[])
+        artifacts.get("fetched_pages", [])
     )
 
     passages = _mapping_list(
-        artifacts.get("passages",[])
+        artifacts.get("passages", [])
     )
 
     return EvidenceResponse(
@@ -2980,8 +3141,8 @@ def _evidence_from_snapshot(
     response_model=EvidenceResponse,
 )
 async def get_session_evidence_api(
-        thread_id: str,
-        request: Request,
+    thread_id: str,
+    request: Request,
 ) -> EvidenceResponse:
     principal = _resolve_request_principal(request)
 
@@ -3810,7 +3971,6 @@ async def support_chat(
         payload.user_id,
     )
 
-    # 认证请求始终使用认证身份，不能由请求体 user_id 覆盖。
     user_id = principal.user_id
 
     try:
@@ -3916,21 +4076,19 @@ async def support_chat(
         ) from exc
 
 
-
 @app.post(
     "/api/chat",
     response_model=None,
 )
 async def chat_api(
-        payload: ChatRequest,
-        request: Request,
+    payload: ChatRequest,
+    request: Request,
 ) -> ChatResponse | StreamingResponse:
-
     principal = _resolve_request_principal(
         request,
         payload.user_id,
     )
-    last_index,user_input = _get_last_user_message(
+    last_index, user_input = _get_last_user_message(
         payload.messages
     )
 
@@ -3944,7 +4102,7 @@ async def chat_api(
         payload.agent_id
         or "default"
     ).strip()
-    agent_record,agent_profile = (
+    agent_record, agent_profile = (
         _resolve_agent_runtime(agent_id)
     )
     requested_model = (
@@ -3959,8 +4117,8 @@ async def chat_api(
         or None
     )
     model = (
-            model_override
-            or settings.primary_model
+        model_override
+        or settings.primary_model
     ).strip()
     user_id = principal.user_id
 
@@ -4016,8 +4174,8 @@ async def chat_api(
         _forget_thread_owner(thread_id)
 
     final_report = str(
-        result.get("final_report","")
-        if isinstance(result,Mapping)
+        result.get("final_report", "")
+        if isinstance(result, Mapping)
         else ""
     ).strip()
 
@@ -4035,15 +4193,15 @@ async def chat_api(
 
 @app.post("/api/chat/sse")
 async def chat_sse(
-        payload: ChatRequest,
-        request: Request,
+    payload: ChatRequest,
+    request: Request,
 ) -> StreamingResponse:
     principal = _resolve_request_principal(
         request,
         payload.user_id,
     )
 
-    last_index,user_input = _get_last_user_message(
+    last_index, user_input = _get_last_user_message(
         payload.messages
     )
 
@@ -4057,7 +4215,7 @@ async def chat_sse(
         payload.agent_id
         or "default"
     ).strip()
-    agent_record,agent_profile = (
+    agent_record, agent_profile = (
         _resolve_agent_runtime(agent_id)
     )
     requested_model = (
@@ -4072,8 +4230,8 @@ async def chat_sse(
         or None
     )
     model = (
-            model_override
-            or settings.primary_model
+        model_override
+        or settings.primary_model
     ).strip()
     user_id = principal.user_id
     search_mode = _normalize_search_mode(
@@ -4112,11 +4270,10 @@ async def chat_sse(
     )
 
 
-
 @app.post("/api/research", response_model=None)
 async def research_api(
-        query: str,
-        request: Request,
+    query: str,
+    request: Request,
 ) -> StreamingResponse:
     principal = _resolve_request_principal(request)
     query = query.strip()
@@ -4131,13 +4288,13 @@ async def research_api(
 
     agent_id = "default"
 
-    agent_record,agent_profile = _resolve_agent_runtime(agent_id)
+    agent_record, agent_profile = _resolve_agent_runtime(agent_id)
 
     agent_model = agent_record.model.strip()
     model_override = agent_model or None
     model = (
-            model_override
-            or settings.primary_model
+        model_override
+        or settings.primary_model
     ).strip()
 
     config = _build_chat_config(
@@ -4175,8 +4332,8 @@ async def research_api(
 
 @app.post("/api/research/sse")
 async def research_sse_api(
-        payload: ResearchRequest,
-        request: Request,
+    payload: ResearchRequest,
+    request: Request,
 ) -> StreamingResponse:
     principal = _resolve_request_principal(
         request,
@@ -4198,7 +4355,7 @@ async def research_sse_api(
         or "default"
     ).strip()
 
-    agent_record,agent_profile = _resolve_agent_runtime(agent_id)
+    agent_record, agent_profile = _resolve_agent_runtime(agent_id)
 
     requested_model = (
         payload.model.strip()
@@ -4212,8 +4369,8 @@ async def research_sse_api(
         or None
     )
     model = (
-            model_override
-            or settings.primary_model
+        model_override
+        or settings.primary_model
     ).strip()
     user_id = principal.user_id
 
@@ -4254,14 +4411,13 @@ async def research_sse_api(
     )
 
 
-
 @app.get(
     "/api/interrupt/{thread_id}/status"
 )
 async def interrupt_status_api(
-        thread_id: str,
-        request: Request,
-) -> dict[str,Any]:
+    thread_id: str,
+    request: Request,
+) -> dict[str, Any]:
     principal = _resolve_request_principal(request)
 
     try:
@@ -4292,7 +4448,7 @@ async def interrupt_status_api(
         "is_interrupted": bool(interrupts),
         "interrupts": interrupts,
         "available_actions": (
-            ["approve","reject"]
+            ["approve", "reject"]
             if interrupts
             else []
         ),
@@ -4303,10 +4459,10 @@ async def interrupt_status_api(
     "/api/interrupt/{thread_id}/resume"
 )
 async def interrupt_resume_api(
-        thread_id: str,
-        request: Request,
-        payload: InterruptResumeRequest,
-) -> dict[str,Any]:
+    thread_id: str,
+    request: Request,
+    payload: InterruptResumeRequest,
+) -> dict[str, Any]:
     principal = _resolve_request_principal(request)
 
     if payload.approved is not None:
@@ -4371,7 +4527,7 @@ async def interrupt_resume_api(
         "thread_id": thread_id,
         "result": (
             dict(result)
-            if isinstance(result,Mapping)
+            if isinstance(result, Mapping)
             else str(result)
         ),
     }
@@ -4403,7 +4559,6 @@ async def clear_search_cache_api():
     return SearchCacheClearResponse(
         cleared=manager.clear_cache(),
     )
-
 
 
 @app.post("/api/sessions/{thread_id}/share")
@@ -4591,6 +4746,324 @@ async def restore_session_version(
         "message": "已返回版本快照；当前不会直接覆盖运行时检查点。",
     }
 
+
+# 7. 增加创建接口
+@app.post("/api/triggers/scheduled")
+async def create_scheduled_trigger(
+    request: Request,
+    payload: ScheduledTriggerRequest,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request,
+        payload.user_id,
+    )
+
+    trigger = ScheduledTrigger(
+        name=payload.name.strip(),
+        description=payload.description,
+        schedule=payload.schedule.strip(),
+        timezone=payload.timezone,
+        run_immediately=payload.run_immediately,
+        agent_id=payload.agent_id,
+        task=payload.task,
+        task_params=payload.task_params,
+        tags=payload.tags,
+        user_id=principal.user_id,
+    )
+
+    trigger_id = await trigger_manager.add(
+        trigger
+    )
+
+    return {
+        "success": True,
+        "trigger_id": trigger_id,
+        "trigger": trigger.to_dict(),
+    }
+
+
+@app.post("/api/triggers/webhook")
+async def create_webhook_trigger(
+    request: Request,
+    payload: WebhookTriggerRequest,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request,
+        payload.user_id,
+    )
+
+    trigger = WebhookTrigger(
+        name=payload.name.strip(),
+        description=payload.description,
+        agent_id=payload.agent_id,
+        task=payload.task,
+        task_params=payload.task_params,
+        http_methods=payload.http_methods,
+        require_auth=payload.require_auth,
+        rate_limit=payload.rate_limit,
+        tags=payload.tags,
+        user_id=principal.user_id,
+    )
+
+    trigger_id = await trigger_manager.add(
+        trigger
+    )
+
+    response = {
+        "success": True,
+        "trigger_id": trigger_id,
+        "trigger": trigger.to_dict(),
+    }
+
+    if trigger.require_auth:
+        response["auth_token"] = (
+            trigger.auth_token
+        )
+
+    return response
+
+
+@app.post("/api/triggers/event")
+async def create_event_trigger(
+    request: Request,
+    payload: EventTriggerRequest,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request,
+        payload.user_id,
+    )
+
+    trigger = EventTrigger(
+        name=payload.name.strip(),
+        description=payload.description,
+        event_type=payload.event_type.strip(),
+        event_source=payload.event_source,
+        event_filters=payload.event_filters,
+        debounce_seconds=payload.debounce_seconds,
+        agent_id=payload.agent_id,
+        task=payload.task,
+        task_params=payload.task_params,
+        tags=payload.tags,
+        user_id=principal.user_id,
+    )
+
+    trigger_id = await trigger_manager.add(
+        trigger
+    )
+
+    return {
+        "success": True,
+        "trigger_id": trigger_id,
+        "trigger": trigger.to_dict(),
+    }
+
+
+# 8. 增加管理接口
+@app.get("/api/triggers")
+async def list_triggers(
+    request: Request,
+    trigger_type: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    principal = _resolve_request_principal(
+        request
+    )
+
+    type_value = (
+        TriggerType(trigger_type)
+        if trigger_type
+        else None
+    )
+    status_value = (
+        TriggerStatus(status)
+        if status
+        else None
+    )
+
+    owner_id = (
+        principal.user_id
+        if configured_api_key
+        else None
+    )
+
+    triggers = trigger_manager.list(
+        trigger_type=type_value,
+        status=status_value,
+        user_id=owner_id,
+    )
+
+    return {
+        "triggers": [
+            item.to_dict()
+            for item in triggers
+        ],
+        "total": len(triggers),
+    }
+
+
+@app.get("/api/triggers/{trigger_id}")
+async def get_trigger(
+    trigger_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    trigger, _ = _trigger_for_principal(
+        trigger_id,
+        request,
+    )
+
+    return {
+        "trigger": trigger.to_dict(),
+    }
+
+
+@app.delete("/api/triggers/{trigger_id}")
+async def delete_trigger(
+    trigger_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    _trigger_for_principal(
+        trigger_id,
+        request,
+    )
+
+    deleted = await trigger_manager.remove(
+        trigger_id
+    )
+
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="触发器不存在。",
+        )
+
+    return {
+        "success": True,
+        "message": "触发器已删除。",
+    }
+
+
+@app.post("/api/triggers/{trigger_id}/pause")
+async def pause_trigger(
+    trigger_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    _trigger_for_principal(
+        trigger_id,
+        request,
+    )
+
+    paused = await trigger_manager.pause(
+        trigger_id
+    )
+
+    if not paused:
+        raise HTTPException(
+            status_code=404,
+            detail="触发器不存在。",
+        )
+
+    return {
+        "success": True,
+        "message": "触发器已暂停。",
+    }
+
+
+@app.post("/api/triggers/{trigger_id}/resume")
+async def resume_trigger(
+    trigger_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    _trigger_for_principal(
+        trigger_id,
+        request,
+    )
+
+    resumed = await trigger_manager.resume(
+        trigger_id
+    )
+
+    if not resumed:
+        raise HTTPException(
+            status_code=404,
+            detail="触发器不存在或不是暂停状态。",
+        )
+
+    return {
+        "success": True,
+        "message": "触发器已恢复。",
+    }
+
+
+@app.get("/api/triggers/{trigger_id}/executions")
+async def get_trigger_executions(
+    trigger_id: str,
+    request: Request,
+    limit: int = 50,
+) -> dict[str, Any]:
+    _trigger_for_principal(
+        trigger_id,
+        request,
+    )
+
+    executions = (
+        trigger_manager.executions_for(
+            trigger_id,
+            limit,
+        )
+    )
+
+    return {
+        "executions": [
+            item.to_dict()
+            for item in executions
+        ],
+        "total": len(executions),
+    }
+
+
+# 9. 增加 Webhook 接口
+@app.post("/api/webhook/{trigger_id}")
+async def handle_webhook(
+    trigger_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    body = None
+
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    result = await trigger_manager.handle_webhook(
+        trigger_id,
+        method=request.method,
+        body=body,
+        query=dict(request.query_params),
+        headers=dict(request.headers),
+        authorization=request.headers.get(
+            "Authorization"
+        ),
+    )
+
+    status_code = int(
+        result.pop(
+            "status_code",
+            200,
+        )
+    )
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status_code,
+            detail=result.get(
+                "error",
+                "Webhook 执行失败。",
+            ),
+        )
+
+    return result
+
+
 @app.post(
     "/api/asr/recognize",
     response_model=None,
@@ -4701,6 +5174,7 @@ async def recognize_speech(
         ),
     }
 
+
 @app.post("/api/asr/upload")
 async def recognize_speech_upload(
     file: UploadFile = File(...),
@@ -4773,6 +5247,7 @@ async def recognize_speech_upload(
         ),
     }
 
+
 @app.get("/api/asr/status")
 async def get_asr_status() -> dict[str, Any]:
     api_key = _dashscope_api_key()
@@ -4791,6 +5266,7 @@ async def get_asr_status() -> dict[str, Any]:
             else None
         ),
     }
+
 
 @app.post("/api/tts/synthesize")
 async def synthesize_speech(
@@ -4831,6 +5307,7 @@ async def synthesize_speech(
         ),
     }
 
+
 @app.get("/api/tts/voices")
 async def get_tts_voices() -> dict[str, Any]:
     return {
@@ -4857,6 +5334,7 @@ async def get_tts_status() -> dict[str, Any]:
             else None
         ),
     }
+
 
 @app.get(
     "/api/screenshots/{filename}",
@@ -4946,6 +5424,7 @@ async def cleanup_screenshots() -> dict[str, Any]:
         "timestamp": _timestamp(),
     }
 
+
 @app.get("/api/browser/{thread_id}/info")
 async def get_browser_session_info(
     thread_id: str,
@@ -4986,6 +5465,7 @@ async def get_browser_session_info(
         ),
     }
 
+
 @app.post("/api/browser/{thread_id}/screenshot")
 async def trigger_browser_screenshot(
     thread_id: str,
@@ -5017,6 +5497,7 @@ async def trigger_browser_screenshot(
             "真实页面截图。"
         ),
     }
+
 
 @app.websocket("/api/browser/{thread_id}/stream")
 async def browser_stream(
