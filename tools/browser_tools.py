@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.core.event_stream import (
+    get_emitter_sync,
+)
 from tools.browser_session import browser_sessions
 from tools.registry import ToolDefinition
 from tools.screenshot_store import get_screenshot_store
@@ -23,6 +26,29 @@ def _page_result(
             : max(int(max_chars), 1)
         ],
     }
+
+
+def _emit_browser_event(
+    thread_id: str,
+    event_type: str,
+    data: dict[str, Any],
+) -> None:
+    try:
+        emitter = get_emitter_sync(
+            thread_id
+        )
+
+        emitter.emit_sync(
+            event_type,
+            {
+                "thread_id": thread_id,
+                **data,
+            },
+        )
+
+    except Exception:
+        # 浏览器事件不能影响主要工具执行。
+        pass
 
 
 def build_browser_tool_definitions(
@@ -48,6 +74,19 @@ def build_browser_tool_definitions(
             engine=engine,
         )
 
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_progress",
+            {
+                "tool": "browser_search",
+                "action": "search_completed",
+                "query": query,
+                "engine": engine,
+                "url": page.url,
+                "title": page.title,
+            },
+        )
+
         return _page_result(
             page,
             max_links=max_links,
@@ -59,6 +98,17 @@ def build_browser_tool_definitions(
         max_links: int = 10,
     ) -> dict[str, Any]:
         page = session().navigate(url)
+
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_progress",
+            {
+                "tool": "browser_navigate",
+                "action": "navigate_completed",
+                "url": page.url,
+                "title": page.title,
+            },
+        )
 
         return _page_result(
             page,
@@ -88,6 +138,18 @@ def build_browser_tool_definitions(
         target_url = current.links[position]["url"]
         page = session().navigate(target_url)
 
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_progress",
+            {
+                "tool": "browser_click",
+                "action": "click_completed",
+                "index": index,
+                "url": page.url,
+                "title": page.title,
+            },
+        )
+
         result = _page_result(
             page,
             max_links=max_links,
@@ -97,9 +159,20 @@ def build_browser_tool_definitions(
         return result
 
     def browser_back() -> dict[str, Any]:
-        return _page_result(
-            session().back()
+        page = session().back()
+
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_progress",
+            {
+                "tool": "browser_back",
+                "action": "back_completed",
+                "url": page.url,
+                "title": page.title,
+            },
         )
+
+        return _page_result(page)
 
     def browser_extract_text(
         max_chars: int = 3000,
@@ -110,6 +183,20 @@ def build_browser_tool_definitions(
             raise ValueError(
                 "当前没有页面，请先调用 browser_navigate。"
             )
+
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_progress",
+            {
+                "tool": "browser_extract_text",
+                "action": "text_extracted",
+                "url": current.url,
+                "characters": min(
+                    len(current.text),
+                    max(int(max_chars), 1),
+                ),
+            },
+        )
 
         return {
             "url": current.url,
@@ -129,6 +216,17 @@ def build_browser_tool_definitions(
                 "当前没有页面，请先调用 browser_navigate。"
             )
 
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_progress",
+            {
+                "tool": "browser_list_links",
+                "action": "links_listed",
+                "url": current.url,
+                "count": len(current.links),
+            },
+        )
+
         return {
             "url": current.url,
             "title": current.title,
@@ -140,6 +238,15 @@ def build_browser_tool_definitions(
     def browser_reset() -> dict[str, Any]:
         browser_sessions.reset(
             normalized_thread_id
+        )
+
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_progress",
+            {
+                "tool": "browser_reset",
+                "action": "session_reset",
+            },
         )
 
         return {
@@ -208,6 +315,19 @@ def build_browser_tool_definitions(
             action="browser_screenshot",
             thread_id=normalized_thread_id,
             page_url=target,
+        )
+
+        _emit_browser_event(
+            normalized_thread_id,
+            "tool_screenshot",
+            {
+                "tool": "browser_screenshot",
+                "action": "screenshot",
+                "url": saved["url"],
+                "filename": saved["filename"],
+                "page_url": target,
+                "mime_type": saved["mime_type"],
+            },
         )
 
         return {
