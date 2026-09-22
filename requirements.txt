@@ -13,3 +13,4 @@ httpx==0.28.1
 langgraph-checkpoint-postgres>=3.0,<4.0
 psycopg[binary]>=3.2,<4.0
 dashscope>=1.24.6
+playwright>=1.47.0

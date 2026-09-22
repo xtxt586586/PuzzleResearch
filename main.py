@@ -104,6 +104,11 @@ from tools.screenshot_store import (
 from tools.browser_session import (
     browser_sessions,
 )
+from tools.browser_stream import (
+    BrowserLiveView,
+    BrowserStreamError,
+    capture_url_screenshot,
+)
 from common.triggers import (
     BaseTrigger,
     EventTrigger,
@@ -5619,13 +5624,66 @@ async def trigger_browser_screenshot(
             "error": "No active browser session",
         }
 
-    return {
-        "success": False,
-        "error": (
-            "当前本地 HTTP 浏览器会话不支持 "
-            "真实页面截图。"
-        ),
-    }
+    page_url = session.current.url
+
+    try:
+        captured = await capture_url_screenshot(
+            page_url,
+            full_page=True,
+            quality=85,
+        )
+
+        metadata = captured.get(
+            "metadata",
+            {},
+        )
+
+        image_data = base64.b64decode(
+            captured["data"]
+        )
+
+        saved = _screenshot_store().save_screenshot(
+            image_data,
+            action="browser_manual",
+            thread_id=thread_id,
+            page_url=page_url,
+            metadata=metadata,
+        )
+
+        emitter = await get_emitter(
+            thread_id
+        )
+
+        await emitter.emit(
+            "tool_screenshot",
+            {
+                "tool": "browser",
+                "action": "manual",
+                "url": saved["url"],
+                "filename": saved["filename"],
+                "page_url": page_url,
+                "mime_type": saved["mime_type"],
+            },
+        )
+
+        return {
+            "success": True,
+            "screenshot_url": saved["url"],
+            "filename": saved["filename"],
+            "page_url": page_url,
+        }
+
+    except BrowserStreamError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"浏览器截图失败：{exc}",
+        }
 
 
 @app.websocket("/api/browser/{thread_id}/stream")
@@ -5639,27 +5697,154 @@ async def browser_stream(
         thread_id
     )
 
+    current_page = (
+        session.current
+        if session is not None
+        else None
+    )
+
     await websocket.send_json(
         {
             "type": "status",
             "thread_id": thread_id,
-            "active": (
-                session is not None
-                and session.current is not None
-            ),
+            "active": current_page is not None,
             "mode": "local",
+            "current_url": (
+                current_page.url
+                if current_page is not None
+                else None
+            ),
         }
     )
+
+    view: BrowserLiveView | None = None
+    frame_task: asyncio.Task | None = None
+    streaming = False
+
+    async def safe_send(
+        payload: dict[str, Any],
+    ) -> bool:
+        try:
+            await websocket.send_json(payload)
+            return True
+        except (
+            WebSocketDisconnect,
+            RuntimeError,
+        ):
+            return False
+
+    async def stop_stream() -> None:
+        nonlocal frame_task
+        nonlocal streaming
+        nonlocal view
+
+        streaming = False
+
+        if frame_task is not None:
+            frame_task.cancel()
+
+            try:
+                await frame_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+            frame_task = None
+
+        if view is not None:
+            await view.stop()
+            view = None
+
+    async def stream_frames(
+        *,
+        quality: int,
+        max_fps: int,
+    ) -> None:
+        nonlocal streaming
+
+        interval = 1.0 / max(
+            int(max_fps or 5),
+            1,
+        )
+
+        while streaming and view is not None:
+            started_at = monotonic()
+
+            try:
+                frame = await view.capture(
+                    full_page=False,
+                    quality=quality,
+                )
+
+                sent = await safe_send(
+                    {
+                        "type": "frame",
+                        "source": "playwright",
+                        "data": frame["data"],
+                        "metadata": frame.get(
+                            "metadata",
+                            {},
+                        ),
+                        "timestamp": (
+                            datetime.now(
+                                timezone.utc
+                            ).isoformat()
+                        ),
+                    }
+                )
+
+                if not sent:
+                    streaming = False
+                    break
+
+            except BrowserStreamError as exc:
+                streaming = False
+
+                await safe_send(
+                    {
+                        "type": "error",
+                        "message": str(exc),
+                    }
+                )
+                break
+
+            except Exception as exc:
+                streaming = False
+
+                await safe_send(
+                    {
+                        "type": "error",
+                        "message": (
+                            f"浏览器帧捕获失败：{exc}"
+                        ),
+                    }
+                )
+                break
+
+            elapsed = monotonic() - started_at
+            remaining = interval - elapsed
+
+            if remaining > 0:
+                await asyncio.sleep(
+                    remaining
+                )
 
     try:
         while True:
             payload = await websocket.receive_json()
+
             action = str(
-                payload.get("action", "")
+                payload.get(
+                    "action",
+                    "",
+                )
             ).strip().lower()
 
             if action == "stop":
-                await websocket.send_json(
+                await stop_stream()
+
+                await safe_send(
                     {
                         "type": "status",
                         "message": "stopped",
@@ -5667,22 +5852,173 @@ async def browser_stream(
                 )
                 break
 
-            if action in {
-                "start",
-                "capture",
-            }:
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "message": (
-                            "当前浏览器会话暂不支持 "
-                            "实时图像帧。"
+            if action == "start":
+                if streaming:
+                    await safe_send(
+                        {
+                            "type": "status",
+                            "message": (
+                                "浏览器帧流已经运行。"
+                            ),
+                        }
+                    )
+                    continue
+
+                if current_page is None:
+                    await safe_send(
+                        {
+                            "type": "error",
+                            "message": (
+                                "No active browser session"
+                            ),
+                        }
+                    )
+                    continue
+
+                quality = max(
+                    1,
+                    min(
+                        int(
+                            payload.get(
+                                "quality",
+                                70,
+                            )
+                            or 70
                         ),
+                        100,
+                    ),
+                )
+
+                max_fps = max(
+                    1,
+                    min(
+                        int(
+                            payload.get(
+                                "max_fps",
+                                5,
+                            )
+                            or 5
+                        ),
+                        15,
+                    ),
+                )
+
+                view = BrowserLiveView()
+
+                try:
+                    await view.start(
+                        current_page.url
+                    )
+                except BrowserStreamError as exc:
+                    await view.stop()
+                    view = None
+
+                    await safe_send(
+                        {
+                            "type": "error",
+                            "message": str(exc),
+                        }
+                    )
+                    continue
+
+                streaming = True
+
+                await safe_send(
+                    {
+                        "type": "status",
+                        "message": "started",
+                        "quality": quality,
+                        "max_fps": max_fps,
                     }
+                )
+
+                frame_task = asyncio.create_task(
+                    stream_frames(
+                        quality=quality,
+                        max_fps=max_fps,
+                    )
                 )
                 continue
 
-            await websocket.send_json(
+            if action == "capture":
+                if current_page is None:
+                    await safe_send(
+                        {
+                            "type": "error",
+                            "message": (
+                                "No active browser session"
+                            ),
+                        }
+                    )
+                    continue
+
+                temporary_view = False
+
+                if view is None:
+                    view = BrowserLiveView()
+                    temporary_view = True
+
+                    try:
+                        await view.start(
+                            current_page.url
+                        )
+                    except BrowserStreamError as exc:
+                        await view.stop()
+                        view = None
+
+                        await safe_send(
+                            {
+                                "type": "error",
+                                "message": str(exc),
+                            }
+                        )
+                        continue
+
+                try:
+                    frame = await view.capture(
+                        full_page=False,
+                        quality=int(
+                            payload.get(
+                                "quality",
+                                85,
+                            )
+                            or 85
+                        ),
+                    )
+
+                    await safe_send(
+                        {
+                            "type": "frame",
+                            "source": "playwright",
+                            "data": frame["data"],
+                            "metadata": frame.get(
+                                "metadata",
+                                {},
+                            ),
+                            "timestamp": (
+                                datetime.now(
+                                    timezone.utc
+                                ).isoformat()
+                            ),
+                        }
+                    )
+
+                except BrowserStreamError as exc:
+                    await safe_send(
+                        {
+                            "type": "error",
+                            "message": str(exc),
+                        }
+                    )
+
+                finally:
+                    if temporary_view:
+                        await view.stop()
+                        view = None
+
+                continue
+
+            await safe_send(
                 {
                     "type": "error",
                     "message": (
@@ -5692,4 +6028,7 @@ async def browser_stream(
             )
 
     except WebSocketDisconnect:
-        return
+        pass
+
+    finally:
+        await stop_stream()
