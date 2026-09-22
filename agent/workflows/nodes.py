@@ -24,6 +24,13 @@ from tools.builtin import create_default_registry
 from agent.core.event_stream import (
     get_emitter_sync,
 )
+from agent.workflows.research_tree import (
+    ResearchTree,
+)
+
+from agent.workflows.knowledge_gap import (
+    analyze_research_quality,
+)
 
 
 def _extract_response_text(response: Any) -> str:
@@ -491,6 +498,53 @@ def deep_plan_node(
         1,
     )
 
+    runtime_config = (
+        config.get("configurable", {})
+        if isinstance(config, Mapping)
+        else {}
+    )
+
+    requested_mode = str(
+        runtime_config.get(
+            "deepsearch_mode",
+            getattr(
+                settings,
+                "deepsearch_mode",
+                "auto",
+            ),
+        )
+        or "auto"
+    ).strip().lower()
+
+    tree_enabled = (
+        bool(
+            getattr(
+                settings,
+                "deepsearch_tree_enabled",
+                True,
+            )
+        )
+        and requested_mode
+        in {
+            "auto",
+            "tree",
+        }
+    )
+
+    research_tree = ResearchTree.from_queries(
+        user_input,
+        queries,
+        epoch=1,
+        max_branches=int(
+            getattr(
+                settings,
+                "deepsearch_tree_max_branches",
+                4,
+            )
+            or 4
+        ),
+    )
+
 
     print(
         "[deep_plan_node]",
@@ -504,7 +558,14 @@ def deep_plan_node(
             int(getattr(settings,"max_revisions",2)),
             0,
         ),
-        "deepsearch_mode": "linear",
+        "research_tree": research_tree.to_dict(),
+        "current_branch_id": research_tree.root_id,
+        "tree_exploration_enabled": tree_enabled,
+        "deepsearch_mode": (
+            "tree"
+            if tree_enabled
+            else "linear"
+        ),
         "deepsearch_epoch": 1,
         "deepsearch_max_epochs": max_epochs,
         "deepsearch_query_history": queries,
@@ -663,6 +724,25 @@ def deep_followup_plan_node(
 
     next_epoch = current_epoch + 1
 
+    research_tree = ResearchTree.from_dict(
+        state.get("research_tree")
+    )
+
+    research_tree.epoch = next_epoch
+
+    research_tree.add_queries(
+        queries,
+        epoch=next_epoch,
+        max_branches=int(
+            getattr(
+                settings,
+                "deepsearch_tree_max_branches",
+                4,
+            )
+            or 4
+        ),
+    )
+
     print(
         "[deep_followup_plan_node]",
         f"epoch={next_epoch}"
@@ -672,6 +752,8 @@ def deep_followup_plan_node(
 
     return {
         "research_plan": queries,
+        "research_tree": research_tree.to_dict(),
+        "current_branch_id": research_tree.root_id,
         "deepsearch_epoch": next_epoch,
         "deepsearch_query_history": queries,
         "deepsearch_artifacts": {
@@ -988,17 +1070,37 @@ def deep_writer_node(
         max_sources=20,
     )
 
+    research_tree = ResearchTree.from_dict(
+        state.get("research_tree")
+    )
+
+    research_tree.record_results(
+        search_results
+    )
+    research_tree.finalize()
+
+    tree_payload = research_tree.to_dict()
+
     return {
         "draft_report": answer,
         "final_report": answer,
         "messages": [
             AIMessage(content=answer)
         ],
+        "research_tree": tree_payload,
         "deepsearch_artifacts": {
             "phase": "synthesized",
-            "epoch": state.get("deepsearch_epoch",1),
-            "result_count": len(search_results),
-            "context_result_count": len(selected_results),
+            "epoch": state.get(
+                "deepsearch_epoch",
+                1,
+            ),
+            "result_count": len(
+                search_results
+            ),
+            "context_result_count": len(
+                selected_results
+            ),
+            "research_tree": tree_payload,
         },
         "current_step": 3,
         "is_complete": False,
@@ -1173,6 +1275,33 @@ def evaluator_node(
         if verdict == "pass" and missing_topics:
             verdict = "revise"
 
+        quality = analyze_research_quality(
+            report=report,
+            sources=source_items,
+            missing_topics=missing_topics,
+            model_dimensions=dimensions,
+            citation_threshold=float(
+                getattr(
+                    settings,
+                    "deepsearch_citation_threshold",
+                    0.6,
+                )
+                or 0.6
+            ),
+        )
+
+        missing_topics = list(
+            dict.fromkeys(
+                [
+                    *missing_topics,
+                    *quality.missing_topics,
+                ]
+            )
+        )
+
+        if missing_topics:
+            verdict = "revise"
+
         if not evaluation:
             evaluation = "评估模型没有提供文字说明。"
 
@@ -1187,6 +1316,16 @@ def evaluator_node(
             "verdict": verdict,
             "eval_dimensions": dimensions,
             "missing_topics": missing_topics,
+            "quality_overall_score": (
+                quality.overall_score
+            ),
+            "quality_gap_count": (
+                quality.gap_count
+            ),
+            "citation_coverage_score": (
+                quality.citation_coverage
+            ),
+            "quality_summary": quality.to_dict(),
             "current_step": 4,
             "status": "running",
         }

@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     deepsearch_results_per_query: int = 5
     deepsearch_max_seconds: float = 0.0
     deepsearch_max_tokens: int = 0
+    deepsearch_tree_enabled: bool = True
+    deepsearch_tree_max_branches: int = 4
+    deepsearch_citation_threshold: float = 0.6
 
     @property
     def search_engines_list(self) -> list[str]:
