@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from time import monotonic
 from html import escape
+import hashlib
 
 import asyncio
 import inspect
@@ -11,7 +12,13 @@ from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import (
     AIMessage,
@@ -67,6 +74,10 @@ from common.tracing import (
     SpanKind,
     SpanStatus,
     trace_request,
+)
+from tools.document_store import (
+    DocumentStoreError,
+    LocalDocumentStore,
 )
 
 
@@ -884,6 +895,64 @@ def _session_manager_with_owner(
         kwargs["owner_id"] = owner_id
 
     return method(*args, **kwargs)
+
+
+
+def _rag_collection_for_request(
+    request: Request,
+) -> str:
+    base = str(
+        getattr(
+            settings,
+            "rag_collection_name",
+            "puzzleresearch_documents",
+        )
+        or "puzzleresearch_documents"
+    ).strip()
+
+    if not configured_api_key:
+        return base
+
+    principal = _resolve_request_principal(
+        request,
+    )
+
+    suffix = hashlib.sha256(
+        principal.user_id.encode("utf-8")
+    ).hexdigest()[:12]
+
+    return f"{base}__u_{suffix}"
+
+
+def _rag_store_for_request(
+    request: Request,
+) -> LocalDocumentStore:
+    return LocalDocumentStore(
+        root=str(
+            getattr(
+                settings,
+                "rag_store_path",
+                "./data/chroma",
+            )
+        ),
+        collection_name=_rag_collection_for_request(
+            request,
+        ),
+    )
+
+
+def _require_rag_enabled() -> None:
+    if not bool(
+        getattr(
+            settings,
+            "rag_enabled",
+            False,
+        )
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="RAG 未启用。",
+        )
 
 
 
@@ -3343,6 +3412,132 @@ async def export_report_api(
             "可用格式：json、markdown、html。"
         ),
     )
+
+
+@app.post("/api/documents/upload")
+async def upload_document_api(
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    _require_rag_enabled()
+
+    content = await file.read()
+
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="文件大小不能超过 50MB。",
+        )
+
+    filename = file.filename or ""
+
+    try:
+        result = _rag_store_for_request(
+            request,
+        ).add_document(
+            filename,
+            content,
+        )
+    except DocumentStoreError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        **result,
+        "message": (
+            f"文档已上传，共生成 "
+            f"{result['chunks']} 个文本块。"
+        ),
+    }
+
+
+@app.get("/api/documents/list")
+async def list_documents_api(
+    request: Request,
+    limit: int = 100,
+) -> dict[str, Any]:
+    _require_rag_enabled()
+
+    try:
+        store = _rag_store_for_request(
+            request,
+        )
+
+        return {
+            "total_chunks": store.count(),
+            "documents": store.list_documents(
+                limit,
+            ),
+        }
+    except DocumentStoreError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+
+@app.delete("/api/documents/{source:path}")
+async def delete_document_api(
+    source: str,
+    request: Request,
+) -> dict[str, Any]:
+    _require_rag_enabled()
+
+    try:
+        result = _rag_store_for_request(
+            request,
+        ).delete_document(source)
+    except DocumentStoreError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=404,
+            detail=result.get(
+                "error",
+                "文档不存在。",
+            ),
+        )
+
+    return result
+
+
+@app.post("/api/documents/search")
+async def search_documents_api(
+    request: Request,
+    query: str,
+    n_results: int = 5,
+) -> dict[str, Any]:
+    _require_rag_enabled()
+
+    if not query.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="搜索内容不能为空。",
+        )
+
+    try:
+        results = _rag_store_for_request(
+            request,
+        ).search(
+            query,
+            n_results,
+        )
+    except DocumentStoreError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "query": query,
+        "results": results,
+    }
 
 
 
