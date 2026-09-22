@@ -79,6 +79,9 @@ from tools.document_store import (
     DocumentStoreError,
     LocalDocumentStore,
 )
+from common.support_memory import (
+    get_support_memory_store,
+)
 
 
 APP_STARTED_AT = monotonic()
@@ -525,6 +528,33 @@ class ExportRequest(BaseModel):
     template: str = "default"
 
 
+class SupportChatRequest(BaseModel):
+    message: str
+    user_id: str | None = "default_user"
+    stream: bool = False
+
+    @field_validator("message")
+    @classmethod
+    def _normalize_message(
+        cls,
+        value: str,
+    ) -> str:
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError(
+                "message 不能为空。"
+            )
+
+        return normalized
+
+
+class SupportChatResponse(BaseModel):
+    content: str
+    role: str = "assistant"
+    timestamp: str
+
+
 
 def _require_owned_session(
     thread_id: str,
@@ -955,6 +985,83 @@ def _require_rag_enabled() -> None:
         )
 
 
+def _support_memory_store():
+    path = str(
+        getattr(
+            settings,
+            "memory_store_path",
+            "./data/support_memory.json",
+        )
+        or "./data/support_memory.json"
+    ).strip()
+
+    max_entries = max(
+        int(
+            getattr(
+                settings,
+                "memory_max_entries",
+                20,
+            )
+            or 20
+        ),
+        1,
+    )
+
+    return get_support_memory_store(
+        path=path,
+        max_entries=max_entries,
+    )
+
+
+def _support_reply_from_result(
+    result: Any,
+) -> str:
+    if isinstance(result, Mapping):
+        for key in (
+            "final_report",
+            "draft_report",
+        ):
+            value = result.get(key)
+
+            if value:
+                return str(value).strip()
+
+        messages = result.get("messages", [])
+    else:
+        messages = []
+
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            message_type = str(
+                getattr(
+                    message,
+                    "type",
+                    "",
+                )
+                or ""
+            ).lower()
+
+            if message_type not in {
+                "ai",
+                "assistant",
+            }:
+                continue
+
+            content = getattr(
+                message,
+                "content",
+                "",
+            )
+
+            if content:
+                return str(content).strip()
+
+    if isinstance(result, str):
+        return result.strip()
+
+    return ""
+
+
 
 class ChatRequest(BaseModel):
     messages: list[Message]
@@ -1378,6 +1485,50 @@ async def health() -> dict[str,Any]:
         "uptime_seconds": monotonic() - APP_STARTED_AT,
         "timestamp": _timestamp(),
     }
+
+
+@app.get("/api/memory/status")
+async def memory_status() -> dict[str, Any]:
+    backend = str(
+        getattr(
+            settings,
+            "memory_store_backend",
+            "memory",
+        )
+        or "memory"
+    ).strip()
+
+    store_url = str(
+        getattr(
+            settings,
+            "memory_store_url",
+            "",
+        )
+        or ""
+    ).strip()
+
+    memory_enabled = bool(
+        getattr(
+            settings,
+            "enable_memory",
+            True,
+        )
+    )
+
+    payload = {
+        "backend": backend,
+        "url_configured": bool(store_url),
+        "checkpointer": bool(chat_checkpointer),
+        "mem0_enabled": memory_enabled,
+        "local_fallback": backend == "memory",
+    }
+
+    if backend == "memory":
+        payload["local_store"] = (
+            _support_memory_store().status()
+        )
+
+    return payload
 
 
 @app.get(
@@ -3538,6 +3689,125 @@ async def search_documents_api(
         "query": query,
         "results": results,
     }
+
+
+@app.post(
+    "/api/support/chat",
+    response_model=SupportChatResponse,
+)
+async def support_chat(
+    request: Request,
+    payload: SupportChatRequest,
+) -> SupportChatResponse:
+    principal = _resolve_request_principal(
+        request,
+        payload.user_id,
+    )
+
+    # 认证请求始终使用认证身份，不能由请求体 user_id 覆盖。
+    user_id = principal.user_id
+
+    try:
+        memory_store = _support_memory_store()
+        memory_enabled = bool(
+            getattr(
+                settings,
+                "enable_memory",
+                True,
+            )
+        )
+
+        memories = []
+
+        if memory_enabled:
+            memories = memory_store.search(
+                user_id,
+                payload.message,
+                limit=3,
+            )
+
+        system_content = (
+            "你是 PuzzleResearch 的支持助手。"
+            "请准确、简洁、友好地回答用户问题。"
+        )
+
+        if memories:
+            memory_lines = []
+
+            for memory in memories:
+                memory_lines.append(
+                    "- 用户问题："
+                    + str(
+                        memory.get(
+                            "query",
+                            "",
+                        )
+                    )
+                )
+                memory_lines.append(
+                    "  历史回答："
+                    + str(
+                        memory.get(
+                            "response",
+                            "",
+                        )
+                    )
+                )
+
+            system_content += (
+                "\n以下是该用户过去对话中的相关记忆：\n"
+                + "\n".join(memory_lines)
+            )
+
+        support_messages = [
+            SystemMessage(
+                content=system_content,
+            ),
+            HumanMessage(
+                content=payload.message,
+            ),
+        ]
+
+        result = await chat_runtime.ainvoke(
+            payload.message,
+            messages=support_messages,
+            config={
+                "configurable": {
+                    "thread_id": user_id
+                    or "support_default",
+                    "user_id": user_id,
+                    "agent_id": "default",
+                },
+            },
+        )
+
+        reply = _support_reply_from_result(result)
+
+        if not reply:
+            reply = "没有生成回复。"
+
+        if memory_enabled:
+            memory_store.add(
+                user_id,
+                payload.message,
+                reply,
+            )
+
+        return SupportChatResponse(
+            content=reply,
+            timestamp=datetime.now(
+                timezone.utc
+            ).isoformat(),
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
 
 
 

@@ -109,6 +109,16 @@ class Settings(BaseSettings):
     rag_collection_name: str = "puzzleresearch_documents"
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
 
+    # ========== 支持对话长期记忆 ==========
+
+    memory_store_backend: str = "memory"
+    memory_store_url: str = ""
+    memory_store_path: str = "./data/support_memory.json"
+    memory_user_id: str = "default_user"
+    memory_max_entries: int = 20
+    enable_memory: bool = True
+    mem0_api_key: str = ""
+
     # ========== Agent 安全配置 ==========
 
     tool_approval: bool = False
