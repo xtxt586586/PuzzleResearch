@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -62,6 +64,16 @@ class SessionManager:
         ):
             return value
 
+        if hasattr(value, "value") and not isinstance(
+            value,
+            (str, bytes),
+        ):
+            return SessionManager._serialize(
+                getattr(value, "value"),
+                depth=depth + 1,
+            )
+
+
         if isinstance(value, BaseMessage):
             return {
                 "type": getattr(
@@ -105,44 +117,108 @@ class SessionManager:
 
     @staticmethod
     def _snapshot_values(
-        snapshot: Any,
+            snapshot: Any,
     ) -> dict[str, Any]:
-        values = getattr(
-            snapshot,
-            "values",
-            {},
-        ) or {}
+        if isinstance(snapshot, Mapping):
+            if "values" in snapshot:
+                values = snapshot.get("values") or {}
+            elif "state" in snapshot:
+                values = snapshot.get("state") or {}
+            else:
+                values = snapshot
+        else:
+            values = getattr(
+                snapshot,
+                "values",
+                {},
+            ) or {}
 
-        return dict(values)
+        return (
+            dict(values)
+            if isinstance(values, Mapping)
+            else {}
+        )
 
     @staticmethod
     def _snapshot_interrupts(
-        snapshot: Any,
+            snapshot: Any,
     ) -> list[Any]:
-        interrupts = getattr(
-            snapshot,
-            "interrupts",
-            [],
-        ) or []
+        if isinstance(snapshot, Mapping):
+            interrupts = snapshot.get(
+                "interrupts"
+            )
 
-        return list(interrupts)
+            if interrupts is None:
+                interrupts = snapshot.get(
+                    "__interrupt__"
+                )
+
+            if interrupts is None:
+                values = snapshot.get(
+                    "values",
+                    {},
+                ) or {}
+
+                if isinstance(values, Mapping):
+                    interrupts = values.get(
+                        "__interrupt__"
+                    )
+        else:
+            interrupts = getattr(
+                snapshot,
+                "interrupts",
+                None,
+            )
+
+        if interrupts is None:
+            return []
+
+        if isinstance(
+                interrupts,
+                (list, tuple, set),
+        ):
+            return list(interrupts)
+
+        return [interrupts]
 
     @staticmethod
     def _status(
-        values: Mapping[str, Any],
+            values: Mapping[str, Any],
+            interrupts: list[Any] | None = None,
     ) -> str:
-        if values.get("is_cancelled"):
-            return "cancelled"
-
-        if values.get("is_complete"):
-            return "completed"
-
-        return str(
+        raw_status = str(
             values.get(
                 "status",
                 "pending",
             )
-        )
+            or "pending"
+        ).strip().lower()
+
+        if (
+                values.get("is_cancelled")
+                or raw_status == "cancelled"
+        ):
+            return "cancelled"
+
+        if raw_status == "failed":
+            return "failed"
+
+        if interrupts:
+            return "paused"
+
+        if (
+                raw_status == "paused"
+                or values.get("needs_clarification")
+        ):
+            return "paused"
+
+        if (
+                values.get("is_complete")
+                or raw_status == "completed"
+        ):
+            return "completed"
+
+        return raw_status
 
     @classmethod
     def _owner_from_values(
@@ -218,20 +294,268 @@ class SessionManager:
 
     @staticmethod
     def _checkpoint_values(
+            checkpoint: Any,
+    ) -> dict[str, Any]:
+        if isinstance(checkpoint, Mapping):
+            raw_checkpoint = checkpoint.get(
+                "checkpoint",
+                checkpoint,
+            ) or {}
+        else:
+            raw_checkpoint = getattr(
+                checkpoint,
+                "checkpoint",
+                {},
+            ) or {}
+
+        if not isinstance(
+                raw_checkpoint,
+                Mapping,
+        ):
+            return {}
+
+        if "channel_values" in raw_checkpoint:
+            values = raw_checkpoint.get(
+                "channel_values"
+            ) or {}
+        elif "values" in raw_checkpoint:
+            values = raw_checkpoint.get(
+                "values"
+            ) or {}
+        else:
+            values = raw_checkpoint
+
+        return (
+            dict(values)
+            if isinstance(values, Mapping)
+            else {}
+        )
+
+
+    @staticmethod
+    def _configurable(
+        value: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+
+        configurable = value.get(
+            "configurable",
+            value,
+        )
+
+        return (
+            dict(configurable)
+            if isinstance(
+                configurable,
+                Mapping,
+            )
+            else {}
+        )
+
+
+    @classmethod
+    def _snapshot_config(
+        cls,
+        snapshot: Any,
+    ) -> dict[str, Any]:
+        if isinstance(snapshot, Mapping):
+            config = snapshot.get(
+                "config",
+                {},
+            ) or {}
+        else:
+            config = getattr(
+                snapshot,
+                "config",
+                {},
+            ) or {}
+
+        return cls._configurable(config)
+
+
+    @classmethod
+    def _checkpoint_config(
+        cls,
         checkpoint: Any,
     ) -> dict[str, Any]:
-        raw_checkpoint = getattr(
-            checkpoint,
-            "checkpoint",
-            {},
-        ) or {}
+        if isinstance(checkpoint, Mapping):
+            config = checkpoint.get(
+                "config",
+                {},
+            ) or {}
+        else:
+            config = getattr(
+                checkpoint,
+                "config",
+                {},
+            ) or {}
 
-        values = raw_checkpoint.get(
-            "channel_values",
-            {},
-        ) or {}
+        return cls._configurable(config)
 
-        return dict(values)
+
+    @staticmethod
+    def _checkpoint_metadata(
+        checkpoint: Any,
+    ) -> dict[str, Any]:
+        if isinstance(checkpoint, Mapping):
+            metadata = checkpoint.get(
+                "metadata",
+                {},
+            ) or {}
+        else:
+            metadata = getattr(
+                checkpoint,
+                "metadata",
+                {},
+            ) or {}
+
+        return (
+            dict(metadata)
+            if isinstance(
+                metadata,
+                Mapping,
+            )
+            else {}
+        )
+
+
+    @classmethod
+    def _parent_checkpoint_id(
+        cls,
+        checkpoint: Any,
+    ) -> str | None:
+        if isinstance(checkpoint, Mapping):
+            parent_config = checkpoint.get(
+                "parent_config",
+                {},
+            ) or {}
+        else:
+            parent_config = getattr(
+                checkpoint,
+                "parent_config",
+                {},
+            ) or {}
+
+        configurable = cls._configurable(
+            parent_config
+        )
+
+        parent_id = configurable.get(
+            "checkpoint_id"
+        )
+
+        return (
+            str(parent_id)
+            if parent_id
+            else None
+        )
+
+
+
+    @classmethod
+    def _extract_deepsearch_artifacts(
+        cls,
+        state: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(state, Mapping):
+            return {}
+
+        raw_artifacts = state.get(
+            "deepsearch_artifacts",
+            {},
+        )
+
+        artifacts = (
+            dict(raw_artifacts)
+            if isinstance(
+                raw_artifacts,
+                Mapping,
+            )
+            else {}
+        )
+
+        research_plan = state.get(
+            "research_plan"
+        )
+
+        query_history = state.get(
+            "deepsearch_query_history"
+        )
+
+        if "queries" not in artifacts:
+            if isinstance(
+                query_history,
+                list,
+            ) and query_history:
+                artifacts["queries"] = list(
+                    query_history
+                )
+            elif isinstance(
+                research_plan,
+                list,
+            ) and research_plan:
+                artifacts["queries"] = list(
+                    research_plan
+                )
+
+        if (
+            "research_tree" not in artifacts
+            and isinstance(
+                state.get("research_tree"),
+                Mapping,
+            )
+        ):
+            artifacts["research_tree"] = dict(
+                state["research_tree"]
+            )
+
+        if (
+            "quality_summary" not in artifacts
+            and isinstance(
+                state.get("quality_summary"),
+                Mapping,
+            )
+        ):
+            artifacts["quality_summary"] = dict(
+                state["quality_summary"]
+            )
+
+        for field_name in (
+            "query_coverage",
+            "freshness_summary",
+        ):
+            if (
+                field_name not in artifacts
+                and isinstance(
+                    state.get(field_name),
+                    Mapping,
+                )
+            ):
+                artifacts[field_name] = dict(
+                    state[field_name]
+                )
+
+        for field_name in (
+            "sources",
+            "claims",
+            "fetched_pages",
+            "passages",
+        ):
+            if (
+                field_name not in artifacts
+                and isinstance(
+                    state.get(field_name),
+                    list,
+                )
+            ):
+                artifacts[field_name] = list(
+                    state[field_name]
+                )
+
+        return artifacts
+
+
 
     def _checkpoint(
         self,
@@ -457,12 +781,14 @@ class SessionManager:
         return summary
 
     def get_state(
-        self,
-        thread_id: str,
-        *,
-        owner_id: str | None = None,
+            self,
+            thread_id: str,
+            *,
+            owner_id: str | None = None,
     ) -> dict[str, Any]:
-        self._checkpoint(thread_id)
+        checkpoint = self._checkpoint(
+            thread_id
+        )
 
         if owner_id is not None:
             self.assert_owner(
@@ -482,34 +808,252 @@ class SessionManager:
             snapshot
         )
 
-        snapshot_config = getattr(
-            snapshot,
-            "config",
-            {},
-        ) or {}
+        snapshot_config = self._snapshot_config(
+            snapshot
+        )
 
-        if isinstance(
-            snapshot_config,
-            Mapping,
-        ):
-            configurable = snapshot_config.get(
-                "configurable",
-                snapshot_config,
-            ) or {}
-        else:
-            configurable = {}
+        checkpoint_config = (
+            self._checkpoint_config(
+                checkpoint
+            )
+        )
+
+        metadata = self._checkpoint_metadata(
+            checkpoint
+        )
+
+        artifacts = (
+            self._extract_deepsearch_artifacts(
+                values
+            )
+        )
+
+        checkpoint_id = (
+                snapshot_config.get(
+                    "checkpoint_id"
+                )
+                or checkpoint_config.get(
+            "checkpoint_id"
+        )
+        )
+
+        checkpoint_ts = str(
+            metadata.get(
+                "created_at",
+                "",
+            )
+            or ""
+        )
 
         return {
             "thread_id": thread_id,
-            "status": self._status(values),
-            "state": self._serialize(values),
+            "status": self._status(
+                values,
+                interrupts,
+            ),
+            "state": self._serialize(
+                values
+            ),
             "interrupts": self._serialize(
                 interrupts
             ),
-            "checkpoint_id": configurable.get(
-                "checkpoint_id"
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_ts": checkpoint_ts,
+            "parent_checkpoint_id": (
+                self._parent_checkpoint_id(
+                    checkpoint
+                )
+            ),
+            "deepsearch_artifacts": (
+                self._serialize(artifacts)
             ),
         }
+
+
+    def get_session_state(
+        self,
+        thread_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        checkpoint = self._checkpoint(
+            thread_id
+        )
+
+        if owner_id is not None:
+            self.assert_owner(
+                thread_id,
+                owner_id,
+            )
+
+        values = self._checkpoint_values(
+            checkpoint
+        )
+
+        metadata = self._checkpoint_metadata(
+            checkpoint
+        )
+
+        artifacts = (
+            self._extract_deepsearch_artifacts(
+                values
+            )
+        )
+
+        return {
+            "thread_id": thread_id,
+            "checkpoint_ts": str(
+                metadata.get(
+                    "created_at",
+                    "",
+                )
+                or ""
+            ),
+            "parent_checkpoint_id": (
+                self._parent_checkpoint_id(
+                    checkpoint
+                )
+            ),
+            "state": self._serialize(
+                values
+            ),
+            "deepsearch_artifacts": (
+                self._serialize(artifacts)
+            ),
+        }
+
+
+    def can_resume(
+        self,
+        thread_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> tuple[bool, str]:
+        try:
+            session = self.get_session(
+                thread_id,
+                owner_id=owner_id,
+            )
+        except SessionNotFoundError:
+            return False, "Session not found"
+
+        status = session["status"]
+
+        if status == "completed":
+            return False, "Session already completed"
+
+        if status == "deleted":
+            return False, "Session has been deleted"
+
+        if status == "running":
+            return False, "Session is currently running"
+
+        return True, "Session can be resumed"
+
+
+
+
+    def build_resume_state(
+        self,
+        thread_id: str,
+        *,
+        additional_input: str | None = None,
+        update_state: Mapping[str, Any] | None = None,
+        owner_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        checkpoint = self._checkpoint(
+            thread_id
+        )
+
+        if owner_id is not None:
+            self.assert_owner(
+                thread_id,
+                owner_id,
+            )
+
+        restored = deepcopy(
+            self._checkpoint_values(
+                checkpoint
+            )
+        )
+
+        artifacts = (
+            self._extract_deepsearch_artifacts(
+                restored
+            )
+        )
+
+        if update_state is not None:
+            if not isinstance(
+                update_state,
+                Mapping,
+            ):
+                raise TypeError(
+                    "update_state 必须是对象。"
+                )
+
+            restored.update(
+                dict(update_state)
+            )
+
+        if additional_input:
+            restored["resume_input"] = (
+                str(additional_input)
+            )
+
+        if artifacts:
+            restored[
+                "deepsearch_artifacts"
+            ] = deepcopy(artifacts)
+
+            queries = artifacts.get(
+                "queries"
+            )
+
+            if (
+                isinstance(queries, list)
+                and queries
+                and not restored.get(
+                    "research_plan"
+                )
+            ):
+                restored["research_plan"] = list(
+                    queries
+                )
+
+            for field_name in (
+                "research_tree",
+                "quality_summary",
+                "query_coverage",
+                "freshness_summary",
+            ):
+                value = artifacts.get(
+                    field_name
+                )
+
+                if (
+                    value
+                    and not restored.get(
+                        field_name
+                    )
+                ):
+                    restored[field_name] = deepcopy(
+                        value
+                    )
+
+        restored[
+            "resumed_from_checkpoint"
+        ] = True
+
+        restored["resumed_at"] = (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
+
+        return restored
+
+
 
     def delete_session(
         self,

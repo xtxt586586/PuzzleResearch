@@ -358,6 +358,201 @@ class SessionManagerTests(unittest.TestCase):
             "checkpoint-001",
         )
 
+
+    def test_get_state_normalizes_interrupt_value_and_pauses(self):
+        snapshot = {
+            "values": {
+                "status": "running",
+                "is_complete": False,
+            },
+            "__interrupt__": [
+                SimpleNamespace(
+                    value={
+                        "type": "tool_approval",
+                        "tool_name": "python_executor",
+                    }
+                )
+            ],
+            "config": {
+                "configurable": {
+                    "thread_id": "thread-001",
+                    "checkpoint_id": "checkpoint-002",
+                }
+            },
+        }
+
+        self.runtime.get_state.return_value = snapshot
+
+        result = self.manager.get_state(
+            "thread-001",
+        )
+
+        self.assertEqual(
+            result["status"],
+            "paused",
+        )
+        self.assertEqual(
+            result["interrupts"][0]["type"],
+            "tool_approval",
+        )
+        self.assertEqual(
+            result["interrupts"][0]["tool_name"],
+            "python_executor",
+        )
+        self.assertEqual(
+            result["checkpoint_id"],
+            "checkpoint-002",
+        )
+
+
+    def test_deepsearch_state_is_extracted(self):
+        checkpoint = self.checkpointer.checkpoints[
+            "thread-001"
+        ]
+
+        checkpoint.checkpoint[
+            "channel_values"
+        ].update(
+            {
+                "research_plan": [
+                    "查询一",
+                    "查询二",
+                ],
+                "research_tree": {
+                    "root_id": "root",
+                    "nodes": [],
+                },
+                "quality_summary": {
+                    "score": 0.85,
+                },
+                "deepsearch_artifacts": {
+                    "phase": "synthesized",
+                },
+            }
+        )
+
+        result = self.manager.get_session_state(
+            "thread-001",
+        )
+
+        self.assertEqual(
+            result[
+                "deepsearch_artifacts"
+            ]["phase"],
+            "synthesized",
+        )
+        self.assertEqual(
+            result[
+                "deepsearch_artifacts"
+            ]["queries"],
+            [
+                "查询一",
+                "查询二",
+            ],
+        )
+        self.assertEqual(
+            result[
+                "deepsearch_artifacts"
+            ]["research_tree"]["root_id"],
+            "root",
+        )
+
+
+    def test_build_resume_state_rehydrates_deepsearch_fields(self):
+        checkpoint = self.checkpointer.checkpoints[
+            "thread-001"
+        ]
+
+        checkpoint.checkpoint[
+            "channel_values"
+        ].update(
+            {
+                "research_plan": [
+                    "恢复查询",
+                ],
+                "research_tree": {
+                    "root_id": "resume-root",
+                },
+                "quality_summary": {
+                    "score": 0.9,
+                },
+                "deepsearch_artifacts": {
+                    "phase": "paused",
+                    "queries": [
+                        "恢复查询",
+                    ],
+                },
+            }
+        )
+
+        restored = self.manager.build_resume_state(
+            "thread-001",
+            additional_input="继续研究",
+            update_state={
+                "status": "running",
+            },
+        )
+
+        self.assertTrue(
+            restored["resumed_from_checkpoint"]
+        )
+        self.assertEqual(
+            restored["resume_input"],
+            "继续研究",
+        )
+        self.assertEqual(
+            restored["status"],
+            "running",
+        )
+        self.assertEqual(
+            restored["research_plan"],
+            [
+                "恢复查询",
+            ],
+        )
+        self.assertEqual(
+            restored["research_tree"]["root_id"],
+            "resume-root",
+        )
+        self.assertEqual(
+            restored["quality_summary"]["score"],
+            0.9,
+        )
+
+
+    def test_can_resume_matches_session_status(self):
+        self.assertEqual(
+            self.manager.can_resume(
+                "thread-001"
+            ),
+            (
+                True,
+                "Session can be resumed",
+            ),
+        )
+
+        self.assertEqual(
+            self.manager.can_resume(
+                "thread-002"
+            ),
+            (
+                False,
+                "Session is currently running",
+            ),
+        )
+
+        self.assertEqual(
+            self.manager.can_resume(
+                "thread-003"
+            ),
+            (
+                False,
+                "Session already completed",
+            ),
+        )
+
+
+
     def test_missing_session_raises_session_not_found(self):
         with self.assertRaises(SessionNotFoundError):
             self.manager.get_session(
