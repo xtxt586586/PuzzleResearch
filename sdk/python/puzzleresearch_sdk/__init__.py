@@ -3,9 +3,12 @@ from .client import (
     PuzzleResearchClient,
 )
 from .types import (
+    McpConfigResponse,
     QualityUpdateData,
     ResearchTreeResponse,
     ResearchTreeUpdateData,
+    SandboxBrowserDiagnoseResponse,
+    SessionStateResponse,
     SseEvent,
     StreamEvent,
 )
@@ -18,4 +21,7 @@ __all__ = [
     "ResearchTreeUpdateData",
     "SseEvent",
     "StreamEvent",
+    "McpConfigResponse",
+    "SandboxBrowserDiagnoseResponse",
+    "SessionStateResponse",
 ]

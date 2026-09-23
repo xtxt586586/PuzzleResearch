@@ -67,5 +67,26 @@ class OpenApiContractTests(unittest.TestCase):
             )
 
 
+    def test_session_state_exposes_recovery_fields(self):
+        schema = self.spec[
+            "components"
+        ]["schemas"]["SessionStateResponse"]
+
+        properties = schema["properties"]
+
+        self.assertIn(
+            "checkpoint_ts",
+            properties,
+        )
+        self.assertIn(
+            "parent_checkpoint_id",
+            properties,
+        )
+        self.assertIn(
+            "deepsearch_artifacts",
+            properties,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

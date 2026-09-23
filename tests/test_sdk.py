@@ -216,5 +216,222 @@ class PuzzleResearchClientTests(unittest.TestCase):
         client.close()
 
 
+    def test_get_session_state_preserves_checkpoint_fields(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertIn(
+                "/api/sessions/thread%2Fstate/state",
+                str(request.url),
+            )
+
+            return httpx.Response(
+                200,
+                json={
+                    "thread_id": "thread/state",
+                    "status": "paused",
+                    "state": {
+                        "research_plan": [
+                            "查询一",
+                        ],
+                    },
+                    "interrupts": [],
+                    "checkpoint_id": "cp-001",
+                    "checkpoint_ts": "2026-09-23T00:00:00Z",
+                    "parent_checkpoint_id": None,
+                    "deepsearch_artifacts": {
+                        "phase": "paused",
+                    },
+                },
+                request=request,
+            )
+
+        http = httpx.Client(
+            transport=httpx.MockTransport(handler)
+        )
+
+        client = PuzzleResearchClient(http=http)
+
+        result = client.get_session_state(
+            "thread/state"
+        )
+
+        self.assertEqual(
+            result["checkpoint_id"],
+            "cp-001",
+        )
+        self.assertEqual(
+            result["deepsearch_artifacts"]["phase"],
+            "paused",
+        )
+
+        client.close()
+
+
+    def test_resume_interrupt_sends_weaver_payload(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(
+                request.method,
+                "POST",
+            )
+            self.assertEqual(
+                request.url.path,
+                "/api/interrupt/resume",
+            )
+
+            body = json.loads(
+                request.content
+            )
+
+            self.assertEqual(
+                body["thread_id"],
+                "thread-resume",
+            )
+            self.assertEqual(
+                body["payload"]["approved"],
+                True,
+            )
+            self.assertEqual(
+                body["model"],
+                "deepseek-chat",
+            )
+
+            return httpx.Response(
+                200,
+                json={
+                    "status": "resumed",
+                },
+                request=request,
+            )
+
+        http = httpx.Client(
+            transport=httpx.MockTransport(handler)
+        )
+
+        client = PuzzleResearchClient(http=http)
+
+        result = client.resume_interrupt(
+            "thread-resume",
+            {
+                "approved": True,
+            },
+            model="deepseek-chat",
+        )
+
+        self.assertEqual(
+            result["status"],
+            "resumed",
+        )
+
+        client.close()
+
+
+    def test_mcp_and_browser_compatibility_methods(self):
+        requests: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(
+                (
+                    request.method,
+                    request.url.path,
+                )
+            )
+
+            if request.url.path == "/api/mcp/config":
+                if request.method == "POST":
+                    body = json.loads(
+                        request.content
+                    )
+                    self.assertTrue(
+                        body["enable"]
+                    )
+                    self.assertEqual(
+                        body["servers"]["demo"]["url"],
+                        "http://localhost:9000",
+                    )
+
+                return httpx.Response(
+                    200,
+                    json={
+                        "enabled": True,
+                        "servers": {
+                            "demo": {
+                                "url": "http://localhost:9000",
+                            }
+                        },
+                        "loaded_tools": 0,
+                    },
+                    request=request,
+                )
+
+            return httpx.Response(
+                200,
+                json={
+                    "ready": True,
+                    "missing": [],
+                    "sandbox_mode": "local",
+                    "allow_internet": True,
+                    "configured": {
+                        "e2b_api_key": False,
+                        "sandbox_template_browser": False,
+                        "e2b_code_interpreter": False,
+                        "playwright": True,
+                    },
+                    "deep": None,
+                },
+                request=request,
+            )
+
+        http = httpx.Client(
+            transport=httpx.MockTransport(handler)
+        )
+
+        client = PuzzleResearchClient(http=http)
+
+        config = client.get_mcp_config()
+
+        self.assertTrue(
+            config["enabled"]
+        )
+
+        updated = client.update_mcp_config(
+            enable=True,
+            servers={
+                "demo": {
+                    "url": "http://localhost:9000",
+                }
+            },
+        )
+
+        self.assertEqual(
+            updated["loaded_tools"],
+            0,
+        )
+
+        diagnosis = client.diagnose_browser()
+
+        self.assertTrue(
+            diagnosis["ready"]
+        )
+
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "GET",
+                    "/api/mcp/config",
+                ),
+                (
+                    "POST",
+                    "/api/mcp/config",
+                ),
+                (
+                    "GET",
+                    "/api/sandbox/browser/diagnose",
+                ),
+            ],
+        )
+
+        client.close()
+
+
 if __name__ == "__main__":
     unittest.main()

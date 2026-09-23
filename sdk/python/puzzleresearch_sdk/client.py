@@ -9,7 +9,10 @@ import httpx
 
 from .sse import normalize_sse_event, parse_sse_frame
 from .types import (
+    McpConfigResponse,
     ResearchTreeResponse,
+    SandboxBrowserDiagnoseResponse,
+    SessionStateResponse,
     StreamEvent,
 )
 
@@ -287,6 +290,18 @@ class PuzzleResearchClient:
         safe_id = _encode_path_param(thread_id)
         return self.request_json(f"/api/sessions/{safe_id}/state")
 
+    def get_session_state(
+        self,
+        thread_id: str,
+    ) -> SessionStateResponse:
+        safe_id = _encode_path_param(
+            thread_id
+        )
+
+        return self.request_json(
+            f"/api/sessions/{safe_id}/state"
+        )
+
     def get_evidence(self, thread_id: str) -> Any:
         safe_id = _encode_path_param(thread_id)
         return self.request_json(f"/api/sessions/{safe_id}/evidence")
@@ -324,6 +339,78 @@ class PuzzleResearchClient:
             method="POST",
             json_body={"resume_value": resume_value},
         )
+
+    def resume_interrupt(
+        self,
+        thread_id: str,
+        payload: Any,
+        *,
+        model: str | None = None,
+        search_mode: Any = None,
+        agent_id: str | None = None,
+    ) -> Any:
+        body: dict[str, Any] = {
+            "thread_id": thread_id,
+            "payload": payload,
+        }
+
+        if model is not None:
+            body["model"] = model
+
+        if search_mode is not None:
+            body["search_mode"] = search_mode
+
+        if agent_id is not None:
+            body["agent_id"] = agent_id
+
+        return self.request_json(
+            "/api/interrupt/resume",
+            method="POST",
+            json_body=body,
+        )
+
+
+    def get_mcp_config(
+        self,
+    ) -> McpConfigResponse:
+        return self.request_json(
+            "/api/mcp/config"
+        )
+
+
+    def update_mcp_config(
+        self,
+        *,
+        enable: bool | None = None,
+        servers: dict[str, Any] | None = None,
+    ) -> McpConfigResponse:
+        body: dict[str, Any] = {}
+
+        if enable is not None:
+            body["enable"] = bool(enable)
+
+        if servers is not None:
+            body["servers"] = dict(servers)
+
+        return self.request_json(
+            "/api/mcp/config",
+            method="POST",
+            json_body=body,
+        )
+
+
+    def diagnose_browser(
+        self,
+        *,
+        deep: bool = False,
+    ) -> SandboxBrowserDiagnoseResponse:
+        return self.request_json(
+            "/api/sandbox/browser/diagnose",
+            params={
+                "deep": str(bool(deep)).lower(),
+            },
+        )
+
 
     def list_tools(self) -> Any:
         return self.request_json("/api/tools/registry")

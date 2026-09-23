@@ -572,6 +572,11 @@ class SessionStateResponse(BaseModel):
     state: dict[str, Any]
     interrupts: list[Any]
     checkpoint_id: str | None = None
+    checkpoint_ts: str = ""
+    parent_checkpoint_id: str | None = None
+    deepsearch_artifacts: dict[str, Any] = Field(
+        default_factory=dict
+    )
 
 
 class SessionResumeRequest(BaseModel):
