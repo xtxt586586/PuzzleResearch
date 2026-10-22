@@ -1842,6 +1842,10 @@ def _estimate_deepsearch_tokens(text: Any) -> int:
     return max(1, len(value) // 4) if value else 0
 
 
+def _normalize_research_topic(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
 def _estimate_search_result_tokens(results: list[Any]) -> int:
     total = 0
     for result in results:
@@ -2080,7 +2084,7 @@ def deep_tree_search_node(
                     if normalized and normalized not in research_plan:
                         research_plan.append(normalized)
         resolved_plan = (
-            [str(item["topic"]).strip() for item in assigned_tasks]
+            [_normalize_research_topic(item["topic"]) for item in assigned_tasks]
             if assigned_tasks
             else research_plan or list(state.get("research_plan") or [])
         )
@@ -2222,17 +2226,22 @@ def deep_tree_search_node(
                 if node.depth == 1 and node.topic == tree.topic and node.query:
                     node.topic = node.query
             task_by_topic = {
-                str(item["topic"]).strip().casefold(): dict(item)
+                _normalize_research_topic(item["topic"]).casefold(): {
+                    **dict(item),
+                    "topic": _normalize_research_topic(item["topic"]),
+                }
                 for item in assigned_tasks
             }
             pending_nodes = [
                 node
                 for node in tree.get_pending_nodes()
-                if node.topic.casefold() in task_by_topic
+                if _normalize_research_topic(node.topic).casefold() in task_by_topic
                 and node.epoch == current_epoch
             ]
             for node in pending_nodes:
-                node_task = task_by_topic.get(node.topic.casefold())
+                node_task = task_by_topic.get(
+                    _normalize_research_topic(node.topic).casefold()
+                )
                 if node_task:
                     node.agent_result = {"assigned_task": node_task}
             workers = min(max(parallel_branches, 1), len(pending_nodes))
@@ -2242,7 +2251,13 @@ def deep_tree_search_node(
                         executor.submit(
                             explorer.explore_branch,
                             node,
-                            {**dict(state), "active_research_task": task_by_topic.get(node.topic.casefold(), {})},
+                            {
+                                **dict(state),
+                                "active_research_task": task_by_topic.get(
+                                    _normalize_research_topic(node.topic).casefold(),
+                                    {},
+                                ),
+                            },
                             per_query_results,
                         )
                         for node in pending_nodes
@@ -2253,7 +2268,13 @@ def deep_tree_search_node(
                 for node in pending_nodes:
                     explorer.explore_branch(
                         node,
-                        {**dict(state), "active_research_task": task_by_topic.get(node.topic.casefold(), {})},
+                        {
+                            **dict(state),
+                            "active_research_task": task_by_topic.get(
+                                _normalize_research_topic(node.topic).casefold(),
+                                {},
+                            ),
+                        },
                         per_query_results,
                     )
         elif (current_epoch > 1 or state.get("plan_reviewed")) and previous_tree:
