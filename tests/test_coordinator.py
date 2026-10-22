@@ -335,6 +335,76 @@ class CoordinatorTests(unittest.TestCase):
             ["研究方案"],
         )
 
+    def test_evaluation_gap_returns_to_coordinator_for_followup_dispatch(self):
+        assigned_topics = []
+        evaluation_count = 0
+
+        def fake_router(state, config=None):
+            return {"route": "deep", "status": "running"}
+
+        def fake_plan(state, config=None):
+            return {
+                "research_plan": ["主要方案"],
+                "deepsearch_epoch": 1,
+                "deepsearch_max_epochs": 2,
+                "revision_count": 0,
+                "max_revisions": 2,
+            }
+
+        def fake_tree(state, config=None):
+            tasks = state["research_tasks"]
+            assigned_topics.extend(task["topic"] for task in tasks)
+            results = [{
+                "query": task["topic"],
+                "title": task["topic"],
+                "url": f"https://example.test/{task['task_id']}",
+                "snippet": "evidence",
+            } for task in tasks]
+            return {
+                "search_results": results,
+                "sources": [{"title": item["title"], "url": item["url"]} for item in results],
+                "research_tree": {"topic": "主题", "nodes": []},
+                "research_agent_results": [{"task_id": task["task_id"], "status": "completed"} for task in tasks],
+                "deepsearch_artifacts": {"phase": "tree_searched"},
+                "deepsearch_mode": "tree",
+            }
+
+        def fake_writer(state, config=None):
+            return {"draft_report": "综合报告", "final_report": "综合报告"}
+
+        def fake_evaluator(state, config=None):
+            nonlocal evaluation_count
+            evaluation_count += 1
+            if evaluation_count == 1:
+                return {"verdict": "revise", "missing_topics": ["成本缺口"]}
+            return {"verdict": "pass", "missing_topics": []}
+
+        coordinator_model = SimpleNamespace(
+            invoke=lambda messages, config=None: SimpleNamespace(
+                content=(
+                    '{"action":"research","reasoning":"补足成本",'
+                    '"priority_topics":["成本缺口"]}'
+                )
+            )
+        )
+        with (
+            patch.object(settings, "use_hierarchical_agents", True),
+            patch("agent.core.graph.router_node", side_effect=fake_router),
+            patch("agent.core.graph.deep_plan_node", side_effect=fake_plan),
+            patch("agent.core.graph.deep_tree_search_node", side_effect=fake_tree),
+            patch("agent.core.graph.deep_writer_node", side_effect=fake_writer),
+            patch("agent.core.graph.evaluator_node", side_effect=fake_evaluator),
+            patch("agent.core.graph.human_review_node", return_value={}),
+            patch("agent.workflows.coordinator.ModelFactory.for_task", return_value=coordinator_model),
+        ):
+            result = create_research_graph().invoke({"input": "主题", "messages": []})
+
+        self.assertEqual(evaluation_count, 2)
+        self.assertEqual(assigned_topics, ["主要方案", "成本缺口"])
+        self.assertEqual(result["deepsearch_epoch"], 2)
+        self.assertEqual(result["coordinator_action"], "complete")
+        self.assertEqual(result["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

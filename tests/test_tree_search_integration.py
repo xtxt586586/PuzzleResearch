@@ -1,4 +1,7 @@
 import unittest
+import asyncio
+import threading
+import uuid
 from unittest.mock import patch
 
 from agent.core.graph import create_research_graph, fan_out_deep_searches
@@ -7,6 +10,7 @@ from agent.workflows.nodes import deep_followup_plan_node, deep_tree_search_node
 from agent.workflows.research_tree import ResearchTree
 from agent.workflows.query_strategy import merge_query_history
 from common.config import settings
+from common.cancellation import cancellation_manager
 
 
 class _Response:
@@ -187,6 +191,11 @@ class TreeSearchIntegrationTests(unittest.TestCase):
             )
 
         self.assertCountEqual(searched, ["成本比较", "风险分析"])
+        self.assertEqual(result["research_plan"], ["成本比较", "风险分析"])
+        self.assertCountEqual(
+            result["deepsearch_query_history"],
+            ["成本比较", "风险分析"],
+        )
         self.assertEqual(
             {item["task_id"] for item in result["research_agent_results"]},
             {"task-cost-001", "task-risk-001"},
@@ -284,6 +293,102 @@ class TreeSearchIntegrationTests(unittest.TestCase):
         self.assertEqual(by_id["task-failed"]["status"], "failed")
         self.assertEqual(by_id["task-success"]["status"], "completed")
         self.assertTrue(any(item.get("url") == "https://example.test/success" for item in result["search_results"]))
+
+    def test_assigned_agents_run_with_configured_concurrency_limit(self):
+        barrier = threading.Barrier(2, timeout=3)
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def fake_search(state):
+            nonlocal active, max_active
+            query = state["query"]
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            barrier.wait()
+            with lock:
+                active -= 1
+            return {
+                "search_results": [{
+                    "title": query,
+                    "url": f"https://example.test/{query}",
+                    "snippet": "evidence",
+                }],
+                "sources": [],
+                "fetched_pages": [],
+                "passages": [],
+            }
+
+        tasks = [
+            {"task_id": "parallel-a", "topic": "并行任务 A", "allowed_tools": ["web_search"]},
+            {"task_id": "parallel-b", "topic": "并行任务 B", "allowed_tools": ["web_search"]},
+        ]
+        with (
+            patch.object(settings, "deepsearch_tree_parallel_branches", 2),
+            patch("agent.workflows.nodes.ModelFactory.for_task", return_value=_Planner()),
+            patch("agent.workflows.nodes.search_node", side_effect=fake_search),
+        ):
+            result = deep_tree_search_node(
+                {
+                    "input": "并行研究",
+                    "research_plan": [task["topic"] for task in tasks],
+                    "research_tasks": tasks,
+                    "deepsearch_epoch": 1,
+                },
+                {},
+            )
+
+        self.assertEqual(max_active, 2)
+        self.assertEqual(len(result["research_agent_results"]), 2)
+
+    def test_cancel_token_is_checked_before_assigned_branch_search(self):
+        token_id = f"research-cancel-{uuid.uuid4().hex}"
+        cancellation_manager.create_token_sync(token_id).cancel("test cancellation")
+        task = {"task_id": "cancelled-task", "topic": "子任务", "allowed_tools": ["web_search"]}
+        with (
+            patch("agent.workflows.nodes.ModelFactory.for_task", return_value=_Planner()),
+            patch("agent.workflows.nodes.search_node") as search,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                deep_tree_search_node(
+                    {
+                        "input": "主题",
+                        "research_plan": ["子任务"],
+                        "research_tasks": [task],
+                        "cancel_token_id": token_id,
+                    },
+                    {},
+                )
+        search.assert_not_called()
+
+    def test_cancel_during_search_prevents_branch_summary_and_next_task(self):
+        token_id = f"research-cancel-{uuid.uuid4().hex}"
+        token = cancellation_manager.create_token_sync(token_id)
+        queries = []
+
+        def fake_search(state):
+            query = state["query"]
+            queries.append(query)
+            token.cancel("cancel during provider call")
+            return {"search_results": [], "sources": []}
+
+        task = {"task_id": "cancel-in-flight", "topic": "子任务", "allowed_tools": ["web_search"]}
+        with (
+            patch("agent.workflows.nodes.ModelFactory.for_task", return_value=_Planner()),
+            patch("agent.workflows.nodes.search_node", side_effect=fake_search),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                deep_tree_search_node(
+                    {
+                        "input": "主题",
+                        "research_plan": ["子任务"],
+                        "research_tasks": [task],
+                        "cancel_token_id": token_id,
+                    },
+                    {},
+                )
+        self.assertEqual(queries, ["子任务"])
 
     def test_tree_node_applies_token_budget_override_and_reports_usage(self):
         search_calls = []

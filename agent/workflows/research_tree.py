@@ -19,6 +19,7 @@ from agent.workflows.research_budget import (
     DEFAULT_DEEPSEARCH_MAX_SECONDS,
     DEFAULT_DEEPSEARCH_MAX_TOKENS,
 )
+from common.cancellation import check_state_cancellation
 
 
 logger = logging.getLogger(__name__)
@@ -866,8 +867,7 @@ class TreeExplorer:
         return compacted
 
     def _check_cancel(self, state: dict[str, Any]) -> None:
-        if state.get("is_cancelled"):
-            raise asyncio.CancelledError("Task was cancelled")
+        check_state_cancellation(state, "research_tree_branch")
 
     def decompose_topic(
         self,
@@ -922,6 +922,7 @@ class TreeExplorer:
             )
         except TypeError:
             raw = self.search_func({"query": query, "max_results": max_results})
+        self._check_cancel(state)
         results = raw.get("results", []) if isinstance(raw, dict) else raw
         normalized_results = [
             item

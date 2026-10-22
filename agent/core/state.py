@@ -156,6 +156,8 @@ class AgentState(TypedDict,total=False):
     research_plan: List[str]
     research_tasks: List[Dict[str, Any]]
     research_agent_results: List[Dict[str, Any]]
+    writer_agent_result: Dict[str, Any]
+    verifier_agent_result: Dict[str, Any]
     plan_reviewed: bool
     human_guidance: str
     current_step: int

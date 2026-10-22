@@ -72,6 +72,12 @@ from agent.workflows.viz_planner import (
     finalize_report_visualizations,
 )
 from agent.workflows.claim_verifier import ClaimStatus, ClaimVerifier
+from agent.workflows.role_agents import (
+    VerifierAgent,
+    VerifierTask,
+    WriterAgent,
+    WriterTask,
+)
 from agent.workflows import quality_assessor
 from tools.research import ContentFetcher
 
@@ -1861,6 +1867,10 @@ def deep_tree_search_node(
     user_input = str(state.get("input", "")).strip()
     if not user_input:
         raise ValueError("树状 Deep Research 缺少用户问题")
+    assigned_tasks = [
+        item for item in (state.get("research_tasks") or [])
+        if isinstance(item, Mapping) and str(item.get("topic", "")).strip()
+    ]
 
     configurable = (
         config.get("configurable", {})
@@ -2069,7 +2079,11 @@ def deep_tree_search_node(
                     normalized = str(query).strip()
                     if normalized and normalized not in research_plan:
                         research_plan.append(normalized)
-        resolved_plan = research_plan or list(state.get("research_plan") or [])
+        resolved_plan = (
+            [str(item["topic"]).strip() for item in assigned_tasks]
+            if assigned_tasks
+            else research_plan or list(state.get("research_plan") or [])
+        )
         query_history_delta = new_query_history_entries(
             state.get("deepsearch_query_history") or [],
             resolved_plan,
@@ -2178,10 +2192,6 @@ def deep_tree_search_node(
     tree_error = ""
     try:
         current_epoch = int(state.get("deepsearch_epoch", 1) or 1)
-        assigned_tasks = [
-            item for item in (state.get("research_tasks") or [])
-            if isinstance(item, Mapping) and str(item.get("topic", "")).strip()
-        ]
         previous_tree = state.get("research_tree")
         if assigned_tasks:
             if previous_tree and current_epoch > 1:
@@ -2639,49 +2649,84 @@ def deep_writer_node(
             selected_results,
             str(research_budget["stop_reason"]),
         )
+        writer_agent_result = {
+            "task_id": f"writer-{state.get('thread_id') or 'session'}-{state.get('deepsearch_epoch', 1)}",
+            "status": "skipped",
+            "report": answer,
+            "tools_used": [],
+            "error": str(research_budget["stop_reason"]),
+            "elapsed_seconds": 0.0,
+        }
     else:
         llm = ModelFactory.for_task(
             "writing",
             temperature=0.3,
             config=config,
         )
+        writer_task = WriterTask(
+            task_id=f"writer-{state.get('thread_id') or 'session'}-{state.get('deepsearch_epoch', 1)}",
+            question=user_input,
+            evidence=selected_results,
+            research_summary=tree_summary,
+            guidance=human_guidance,
+            images=[item for item in (state.get("images") or []) if isinstance(item, dict)],
+        )
 
-        messages = [
-            SystemMessage(
-                content=(
-                    f"{get_prompt_manager(config).get_prompt('deep_writer')}"
-                    "引用来源时使用 [来源1]、[来源2] 格式。"
-                    "建议使用清晰的标题和小节。"
-                    "直接输出完整报告，不要描述内部工作流程。"
+        def generate_report(task: WriterTask) -> str:
+            nonlocal research_budget
+            task_context_blocks: list[str] = []
+            if task.research_summary:
+                task_context_blocks.append(
+                    f"【树状研究合并摘要】\n{task.research_summary}"
                 )
-            ),
-            HumanMessage(
-                content=_build_model_user_content(
-                    (
-                        f"用户问题：\n{user_input}\n"
-                        f"多来源研究材料：\n{research_context}\n"
-                        f"人工补充要求：\n{human_guidance or '无'}\n"
-                    ),
-                    state.get("images"),
+            for index, item in enumerate(task.evidence, start=1):
+                title = str(item.get("title", "")).strip()
+                url = str(item.get("url", "")).strip()
+                query = str(item.get("query", "")).strip()
+                snippet = str(item.get("snippet", "")).strip()
+                content = str(item.get("content", "")).strip()
+                task_context_blocks.append(
+                    f"【来源 {index}】\n"
+                    f"所属查询：{query}\n"
+                    f"标题：{title}\n"
+                    f"链接：{url}\n"
+                    f"内容：{(content or snippet)[:2200]}"
                 )
-            ),
-        ]
+            task_evidence_context = "\n\n".join(task_context_blocks)
+            messages = [
+                SystemMessage(
+                    content=(
+                        f"{get_prompt_manager(config).get_prompt('deep_writer')}"
+                        "引用来源时使用 [来源1]、[来源2] 格式。"
+                        "建议使用清晰的标题和小节。"
+                        "直接输出完整报告，不要描述内部工作流程。"
+                    )
+                ),
+                HumanMessage(
+                    content=_build_model_user_content(
+                        (
+                            f"用户问题：\n{task.question}\n"
+                            f"多来源研究材料：\n{task_evidence_context}\n"
+                            f"人工补充要求：\n{task.guidance or '无'}\n"
+                        ),
+                        task.images,
+                    )
+                ),
+            ]
+            messages = _apply_agent_system_prompt(messages, config)
+            response = llm.invoke(messages, config=config)
+            research_budget = _record_research_model_usage(
+                research_budget,
+                messages,
+                response,
+            )
+            return _extract_response_text(response)
 
-        messages = _apply_agent_system_prompt(
-            messages,
-            config,
-        )
-
-        response = llm.invoke(
-            messages,
-            config=config,
-        )
-        research_budget = _record_research_model_usage(
-            research_budget,
-            messages,
-            response,
-        )
-        answer = _extract_response_text(response).strip()
+        writer_result = WriterAgent(generate_report).run(writer_task)
+        writer_agent_result = writer_result.model_dump(mode="json")
+        if writer_result.status != "completed":
+            raise RuntimeError(writer_result.error or "Writer Agent failed")
+        answer = writer_result.report
 
     if not answer:
         raise ValueError("Deep Writer 模型返回了空回答")
@@ -2754,6 +2799,7 @@ def deep_writer_node(
         "freshness_summary": quality_diagnostics["freshness_summary"],
         "quality_summary": quality_summary,
         "compressed_knowledge": compressed.to_dict(),
+        "writer_agent": writer_agent_result,
     }
     artifacts = _store_research_budget(
         artifacts,
@@ -2764,6 +2810,7 @@ def deep_writer_node(
     return {
         "draft_report": answer,
         "final_report": answer,
+        "writer_agent_result": writer_agent_result,
         "messages": [
             AIMessage(content=answer)
         ],
@@ -3146,6 +3193,17 @@ def evaluator_node(
             verdict = "revise"
 
         claim_payloads: list[dict[str, Any]] = []
+        verifier_agent_result: dict[str, Any] = {
+            "task_id": f"verifier-{state.get('thread_id') or 'session'}-{state.get('deepsearch_epoch', 1)}",
+            "status": "empty",
+            "claims": [],
+            "verified_count": 0,
+            "unsupported_count": 0,
+            "contradicted_count": 0,
+            "tools_used": [],
+            "error": "",
+            "elapsed_seconds": 0.0,
+        }
         contradicted_count = 0
         unsupported_count = 0
         if state.get("route") == "deep":
@@ -3170,40 +3228,24 @@ def evaluator_node(
                     )
                 ),
             )
-            checks = verifier.verify_report(
-                report,
-                scraped_content,
+            verifier_task = VerifierTask(
+                task_id=f"verifier-{state.get('thread_id') or 'session'}-{state.get('deepsearch_epoch', 1)}",
+                report=report,
+                scraped_content=scraped_content,
                 passages=(
                     list(state.get("passages") or [])
-                    if bool(
-                        getattr(
-                            settings,
-                            "deepsearch_claim_verifier_use_passages",
-                            True,
-                        )
-                    )
-                    else None
+                    if bool(getattr(settings, "deepsearch_claim_verifier_use_passages", True))
+                    else []
                 ),
             )
-            claim_payloads = [
-                {
-                    "claim": check.claim,
-                    "status": check.status.value,
-                    "evidence_urls": check.evidence_urls,
-                    "evidence_passages": check.evidence_passages,
-                    "score": check.score,
-                    "notes": check.notes,
-                }
-                for check in checks
-            ]
-            contradicted_count = sum(
-                check.status == ClaimStatus.CONTRADICTED
-                for check in checks
-            )
-            unsupported_count = sum(
-                check.status == ClaimStatus.UNSUPPORTED
-                for check in checks
-            )
+            verifier_agent_result = VerifierAgent(verifier).run(verifier_task).model_dump(mode="json")
+            claim_payloads = list(verifier_agent_result["claims"])
+            contradicted_count = int(verifier_agent_result["contradicted_count"])
+            unsupported_count = int(verifier_agent_result["unsupported_count"])
+            if verifier_agent_result["status"] == "failed":
+                verdict = "revise"
+                missing_topics = list(dict.fromkeys([*missing_topics, "引用证据核查失败"] ))
+                evaluation = f"{evaluation} Verifier Agent 执行失败，不能确认报告主张均有证据支持。".strip()
 
             max_contradicted = max(
                 0,
@@ -3301,6 +3343,7 @@ def evaluator_node(
         if knowledge_gap_analysis is not None:
             artifacts["knowledge_gap_analysis"] = knowledge_gap_analysis
         artifacts["claims"] = claim_payloads
+        artifacts["verifier_agent"] = verifier_agent_result
         artifacts["claim_verifier"] = {
             "contradicted_count": contradicted_count,
             "unsupported_count": unsupported_count,
@@ -3351,6 +3394,7 @@ def evaluator_node(
             ),
             "quality_summary": quality_summary,
             "deepsearch_artifacts": artifacts,
+            "verifier_agent_result": verifier_agent_result,
             **budget_state_fields(research_budget),
             "current_step": 4,
             "status": "running",
