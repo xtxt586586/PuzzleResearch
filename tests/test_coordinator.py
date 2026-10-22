@@ -188,6 +188,66 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(result["research_tasks"][0]["context"]["retry_count"], 1)
         self.assertEqual(result["deepsearch_epoch"], 2)
 
+    def test_failed_first_attempt_without_evidence_retries_in_a_new_epoch(self):
+        state = self._reviewed_state(
+            draft_report="",
+            final_report="",
+            search_results=[],
+            deepsearch_epoch=1,
+            research_tasks=[{
+                "task_id": "research-cost-epoch-1",
+                "topic": "成本对比",
+                "context": {"retry_count": 0, "epoch": 1},
+            }],
+            research_agent_results=[{
+                "task_id": "research-cost-epoch-1",
+                "status": "failed",
+                "error": "search provider unavailable",
+            }],
+        )
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("worker retry must not call the coordinator model"),
+        ):
+            result = coordinator_node(state, {})
+
+        self.assertEqual(result["coordinator_action"], "research")
+        self.assertEqual(result["deepsearch_epoch"], 2)
+        self.assertEqual(result["research_tasks"][0]["topic"], "成本对比")
+        self.assertEqual(result["research_tasks"][0]["context"]["retry_count"], 1)
+        self.assertNotEqual(
+            result["research_tasks"][0]["task_id"],
+            "research-cost-epoch-1",
+        )
+
+    def test_second_failure_without_evidence_stops_automatic_redispatch(self):
+        state = self._reviewed_state(
+            draft_report="",
+            final_report="",
+            search_results=[],
+            deepsearch_epoch=2,
+            research_tasks=[{
+                "task_id": "research-cost-epoch-2",
+                "topic": "成本对比",
+                "context": {"retry_count": 1, "epoch": 2},
+            }],
+            research_agent_results=[{
+                "task_id": "research-cost-epoch-1",
+                "status": "failed",
+                "error": "search provider unavailable",
+            }, {
+                "task_id": "research-cost-epoch-2",
+                "status": "failed",
+                "error": "search provider unavailable",
+            }],
+        )
+
+        result = coordinator_node(state, {})
+
+        self.assertEqual(result["coordinator_action"], "complete")
+        self.assertIn("重试后仍未产出证据", result["coordinator_reasoning"])
+        self.assertNotIn("research_tasks", result)
+
     def test_failed_agent_branch_is_not_retried_more_than_once(self):
         state = self._reviewed_state(
             research_tasks=[{

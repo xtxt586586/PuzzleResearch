@@ -276,6 +276,19 @@ def coordinator_node(
         if search_results:
             action = "synthesize"
             reasoning = "已有搜索证据但尚无报告，进入综合阶段。"
+            topics = []
+        elif retry_topics and can_research:
+            action = "research"
+            reasoning = "研究分支无可用证据，按上限重试失败任务。"
+            topics = retry_topics
+        elif retry_topics:
+            action = "complete"
+            reasoning = "研究轮次已耗尽，不再重试失败分支。"
+            topics = []
+        elif state.get("research_agent_results"):
+            action = "complete"
+            reasoning = "研究分支重试后仍未产出证据，停止自动派单。"
+            topics = []
         else:
             action = "research"
             reasoning = "研究计划已具备，交由独立研究 Agent 并行收集证据。"
@@ -410,7 +423,7 @@ def coordinator_node(
             if str(topic).strip()
         ]
         task_state = dict(state)
-        if report and search_results:
+        if retry_topics or (report and search_results):
             next_epoch = min(epoch + 1, max_epochs)
             task_state["deepsearch_epoch"] = next_epoch
             result["deepsearch_epoch"] = next_epoch
