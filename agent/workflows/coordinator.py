@@ -116,7 +116,7 @@ def _build_research_tasks(
     """Create stable, bounded task contracts without an additional model call."""
     overall_topic = str(state.get("input", "")).strip()[:500]
     missing = {
-        str(topic).strip().casefold()
+        " ".join(str(topic).split()).casefold()
         for topic in (state.get("missing_topics") or [])
         if str(topic).strip()
     }
@@ -125,15 +125,21 @@ def _build_research_tasks(
     except (TypeError, ValueError):
         task_limit = 4
     tasks: list[dict[str, Any]] = []
-    for index, topic in enumerate(topics[:task_limit]):
+    seen_topics: set[str] = set()
+    for topic in topics:
         normalized = " ".join(str(topic).split())[:500]
-        if not normalized:
+        canonical_topic = normalized.casefold()
+        if not normalized or canonical_topic in seen_topics:
             continue
+        if len(tasks) >= task_limit:
+            break
+        seen_topics.add(canonical_topic)
+        index = len(tasks)
         digest = hashlib.sha1(
-            f"{overall_topic.casefold()}|{normalized.casefold()}|"
+            f"{overall_topic.casefold()}|{canonical_topic}|"
             f"{max(int(state.get('deepsearch_epoch', 1) or 1), 1)}".encode("utf-8")
         ).hexdigest()[:12]
-        is_gap = normalized.casefold() in missing
+        is_gap = canonical_topic in missing
         tasks.append({
             "task_id": f"research-{digest}",
             "topic": normalized,
@@ -149,7 +155,7 @@ def _build_research_tasks(
                 "related_topics": [
                     str(item)[:500]
                     for item in (state.get("research_plan") or [])[:8]
-                    if str(item).strip().casefold() != normalized.casefold()
+                    if " ".join(str(item).split()).casefold() != canonical_topic
                 ],
                 "known_gaps": [str(item)[:500] for item in (state.get("missing_topics") or [])[:8]],
                 "epoch": max(int(state.get("deepsearch_epoch", 1) or 1), 1),

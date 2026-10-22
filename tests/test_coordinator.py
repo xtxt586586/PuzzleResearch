@@ -107,6 +107,26 @@ class CoordinatorTests(unittest.TestCase):
             "成本对比",
         )
 
+    def test_duplicate_topic_variants_produce_one_research_task(self):
+        model = SimpleNamespace(
+            invoke=lambda messages, config=None: SimpleNamespace(
+                content=(
+                    '{"action":"research","reasoning":"补足成本证据",'
+                    '"priority_topics":["Cost Analysis", " cost   analysis "]}'
+                )
+            )
+        )
+
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = coordinator_node(self._reviewed_state(), {})
+
+        self.assertEqual(len(result["research_tasks"]), 1)
+        self.assertEqual(result["research_tasks"][0]["topic"], "Cost Analysis")
+        self.assertEqual(len({task["task_id"] for task in result["research_tasks"]}), 1)
+
     def test_coordinator_model_usage_is_added_to_shared_budget(self):
         model = SimpleNamespace(
             invoke=lambda messages, config=None: SimpleNamespace(
