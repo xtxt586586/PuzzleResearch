@@ -19,8 +19,13 @@ class _Response:
 
 
 class _Planner:
+    def __init__(self, prompts=None):
+        self.prompts = prompts
+
     def invoke(self, message, config=None):
         content = str(message[0].get("content", ""))
+        if self.prompts is not None:
+            self.prompts.append(content)
         if "分解" in content:
             return _Response(
                 '{"subtopics":[{"topic":"分支 A","relevance":1.0},'
@@ -138,6 +143,7 @@ class TreeSearchIntegrationTests(unittest.TestCase):
 
     def test_coordinator_tasks_execute_without_tree_replanning(self):
         searched = []
+        model_prompts = []
 
         def fake_search(state):
             query = state["query"]
@@ -177,7 +183,7 @@ class TreeSearchIntegrationTests(unittest.TestCase):
             patch.object(settings, "deepsearch_tree_max_branches", 4),
             patch.object(settings, "deepsearch_tree_queries_per_branch", 3),
             patch.object(settings, "deepsearch_tree_parallel_branches", 0),
-            patch("agent.workflows.nodes.ModelFactory.for_task", return_value=_Planner()),
+            patch("agent.workflows.nodes.ModelFactory.for_task", return_value=_Planner(model_prompts)),
             patch("agent.workflows.nodes.search_node", side_effect=fake_search),
         ):
             result = deep_tree_search_node(
@@ -192,6 +198,10 @@ class TreeSearchIntegrationTests(unittest.TestCase):
 
         self.assertCountEqual(searched, ["成本比较", "风险分析"])
         self.assertEqual(result["research_plan"], ["成本比较", "风险分析"])
+        self.assertTrue(any("收集成本数据" in prompt for prompt in model_prompts))
+        self.assertTrue(any('"focus": "成本"' in prompt for prompt in model_prompts))
+        self.assertTrue(any("收集风险证据" in prompt for prompt in model_prompts))
+        self.assertTrue(any('"focus": "风险"' in prompt for prompt in model_prompts))
         self.assertCountEqual(
             result["deepsearch_query_history"],
             ["成本比较", "风险分析"],

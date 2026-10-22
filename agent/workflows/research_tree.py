@@ -1030,9 +1030,16 @@ class TreeExplorer:
             if assigned:
                 remaining = 0
             if remaining:
+                task_brief = self._format_task_brief(task)
                 response = self._invoke(
                     self.planner_llm,
-                    [{"role": "user", "content": f"为主题生成 {remaining} 个补充查询：{node.topic}"}],
+                    [{
+                        "role": "user",
+                        "content": (
+                            f"{task_brief}\n为该研究任务生成 {remaining} 个补充查询。"
+                            "查询应直接服务于任务目标，避免重复已有主题。"
+                        ),
+                    }],
                 )
                 seen = {item.casefold() for item in node.queries}
                 for query in self._parse_list_output(getattr(response, "content", "")):
@@ -1047,7 +1054,7 @@ class TreeExplorer:
                     query=query,
                     max_results=per_query_results,
                 )
-            return {"summary": self._summarize_branch(node)}
+            return {"summary": self._summarize_branch(node, task)}
 
         result = ResearchAgent({"web_search": web_search}).run(task, execute)
         node.agent_result = result.model_dump(mode="json")
@@ -1102,7 +1109,25 @@ class TreeExplorer:
             lines.append(f"- {title}：{excerpt}{suffix}".strip())
         return "\n".join(lines)
 
-    def _summarize_branch(self, node: ResearchTreeNode) -> str:
+    @staticmethod
+    def _format_task_brief(task: ResearchTask) -> str:
+        context = json.dumps(
+            task.context,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )[:1600]
+        return (
+            f"研究任务：{task.topic}\n"
+            f"研究目标：{task.objective or task.topic}\n"
+            f"任务上下文（仅用于限定本分支）：{context}"
+        )
+
+    def _summarize_branch(
+        self,
+        node: ResearchTreeNode,
+        task: ResearchTask | None = None,
+    ) -> str:
         """用研究模型总结单个分支，模型失败时退回本地摘要。"""
         if not node.findings:
             return ""
@@ -1118,9 +1143,10 @@ class TreeExplorer:
                 f"摘要：{str(result.get('content') or result.get('snippet') or result.get('summary', '')).strip()[:800]}"
             )
 
+        task_brief = self._format_task_brief(task) if task else f"研究任务：{node.topic}"
         prompt = (
             f"{get_prompt_manager(self.config).get_prompt('tree_branch_summarizer')}\n"
-            f"分支主题：{node.topic}\n"
+            f"{task_brief}\n"
             "使用简洁要点，最多 500 字。\n\n"
             + "\n\n".join(findings_text)
         )
