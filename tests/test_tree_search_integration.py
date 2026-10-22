@@ -545,7 +545,19 @@ class TreeSearchIntegrationTests(unittest.TestCase):
                 patch("agent.workflows.nodes.search_node", side_effect=fake_search),
             ):
                 result = deep_tree_search_node(
-                    {"input": "研究主题", "deepsearch_epoch": 1},
+                    {
+                        "input": "研究主题",
+                        "research_plan": ["事件研究方向"],
+                        "research_tasks": [{
+                            "task_id": "event-agent-task-001",
+                            "topic": "事件研究方向",
+                            "objective": "核实研究方向的事实依据",
+                            "priority": 5,
+                            "context": {"epoch": 1},
+                            "allowed_tools": ["web_search"],
+                        }],
+                        "deepsearch_epoch": 1,
+                    },
                     {"configurable": {"thread_id": thread_id}},
                 )
 
@@ -578,6 +590,16 @@ class TreeSearchIntegrationTests(unittest.TestCase):
             self.assertIn("research_node_complete", event_types)
             self.assertIn("research_tree_update", event_types)
             self.assertIn("quality_update", event_types)
+            start_event = next(
+                event for event in events
+                if event.event_type == "research_node_start"
+            )
+            self.assertEqual(start_event.data["agent_id"], "event-agent-task-001")
+            self.assertEqual(start_event.data["task_id"], "event-agent-task-001")
+            self.assertEqual(start_event.data["objective"], "核实研究方向的事实依据")
+            self.assertEqual(start_event.data["priority"], 5)
+            self.assertEqual(start_event.data["epoch"], 1)
+            self.assertEqual(start_event.data["allowed_tools"], ["web_search"])
         finally:
             remove_emitter_sync(thread_id)
 

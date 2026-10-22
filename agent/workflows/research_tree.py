@@ -973,15 +973,6 @@ class TreeExplorer:
     def explore_branch(self, node: ResearchTreeNode, state: dict[str, Any], per_query_results: int = 5) -> None:
         self._start_budget(node.topic)
         self._check_cancel(state)
-        self._publish_event(
-            "research_node_start",
-            {
-                "node_id": node.id,
-                "topic": node.topic,
-                "depth": node.depth,
-                "parent_id": node.parent_id,
-            },
-        )
         node.status = ResearchNodeStatus.RUNNING
         node.query = node.query or node.topic
         node.queries = [node.topic] if node.topic else []
@@ -1011,6 +1002,22 @@ class TreeExplorer:
                 },
                 allowed_tools={"web_search"},
             )
+
+        self._publish_event(
+            "research_node_start",
+            {
+                "node_id": node.id,
+                "agent_id": task.task_id,
+                "task_id": task.task_id,
+                "topic": node.topic,
+                "objective": task.objective,
+                "priority": task.priority,
+                "epoch": node.epoch,
+                "allowed_tools": sorted(task.allowed_tools),
+                "depth": node.depth,
+                "parent_id": node.parent_id,
+            },
+        )
 
         def execute(agent_context: Any) -> dict[str, Any]:
             if node.queries:
