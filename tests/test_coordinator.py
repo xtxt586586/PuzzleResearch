@@ -164,6 +164,56 @@ class CoordinatorTests(unittest.TestCase):
             second["research_tasks"][0]["task_id"],
         )
 
+    def test_failed_agent_branch_is_retried_once_with_incremented_retry_count(self):
+        state = self._reviewed_state(
+            research_tasks=[{
+                "task_id": "research-failed",
+                "topic": "成本对比",
+                "context": {"retry_count": 0},
+            }],
+            research_agent_results=[{
+                "task_id": "research-failed",
+                "status": "failed",
+                "error": "provider timeout",
+            }],
+        )
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("failed worker retry is a deterministic policy"),
+        ):
+            result = coordinator_node(state, {})
+
+        self.assertEqual(result["coordinator_action"], "research")
+        self.assertEqual(result["research_tasks"][0]["topic"], "成本对比")
+        self.assertEqual(result["research_tasks"][0]["context"]["retry_count"], 1)
+        self.assertEqual(result["deepsearch_epoch"], 2)
+
+    def test_failed_agent_branch_is_not_retried_more_than_once(self):
+        state = self._reviewed_state(
+            research_tasks=[{
+                "task_id": "research-failed-again",
+                "topic": "成本对比",
+                "context": {"retry_count": 1},
+            }],
+            research_agent_results=[{
+                "task_id": "research-failed-again",
+                "status": "empty",
+            }],
+        )
+        model = SimpleNamespace(
+            invoke=lambda messages, config=None: SimpleNamespace(
+                content='{"action":"synthesize","reasoning":"使用现有证据","priority_topics":[]}'
+            )
+        )
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = coordinator_node(state, {})
+
+        self.assertEqual(result["coordinator_action"], "synthesize")
+        self.assertNotIn("research_tasks", result)
+
     def test_task_count_respects_tree_branch_limit(self):
         state = self._reviewed_state(
             missing_topics=[f"缺口 {index}" for index in range(8)],

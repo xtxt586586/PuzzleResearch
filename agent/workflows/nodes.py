@@ -2198,10 +2198,17 @@ def deep_tree_search_node(
                 tree = ResearchTree.from_dict(previous_tree)
                 explorer.tree = tree
                 tree.epoch = current_epoch
+                retry_topics = {
+                    str(item.get("topic", "")).strip().casefold()
+                    for item in assigned_tasks
+                    if isinstance(item.get("context"), Mapping)
+                    and int(item["context"].get("retry_count", 0) or 0) > 0
+                }
                 tree.add_queries(
                     [str(item["topic"]) for item in assigned_tasks],
                     epoch=current_epoch,
                     max_branches=max_branches,
+                    allow_existing=retry_topics,
                 )
             else:
                 tree = ResearchTree.from_queries(
@@ -2222,6 +2229,7 @@ def deep_tree_search_node(
                 node
                 for node in tree.get_pending_nodes()
                 if node.topic.casefold() in task_by_topic
+                and node.epoch == current_epoch
             ]
             for node in pending_nodes:
                 node_task = task_by_topic.get(node.topic.casefold())

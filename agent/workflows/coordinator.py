@@ -111,6 +111,7 @@ def _parse_decision(response: Any) -> tuple[str, str, list[str]]:
 def _build_research_tasks(
     state: Mapping[str, Any],
     topics: list[str],
+    retry_counts: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Create stable, bounded task contracts without an additional model call."""
     overall_topic = str(state.get("input", "")).strip()[:500]
@@ -152,6 +153,10 @@ def _build_research_tasks(
                 ],
                 "known_gaps": [str(item)[:500] for item in (state.get("missing_topics") or [])[:8]],
                 "epoch": max(int(state.get("deepsearch_epoch", 1) or 1), 1),
+                "retry_count": max(
+                    0,
+                    int((retry_counts or {}).get(normalized.casefold(), 0) or 0),
+                ),
             },
             "allowed_tools": ["web_search"],
         })
@@ -211,6 +216,29 @@ def coordinator_node(
         for topic in (state.get("missing_topics") or [])
         if str(topic).strip()
     ]
+    assigned_tasks = {
+        str(task.get("task_id", "")): task
+        for task in (state.get("research_tasks") or [])
+        if isinstance(task, Mapping) and task.get("task_id")
+    }
+    retry_counts: dict[str, int] = {}
+    retry_topics: list[str] = []
+    for agent_result in state.get("research_agent_results") or []:
+        if not isinstance(agent_result, Mapping):
+            continue
+        if str(agent_result.get("status", "")).strip().lower() not in {"failed", "empty"}:
+            continue
+        if agent_result.get("stop_reason"):
+            continue
+        task = assigned_tasks.get(str(agent_result.get("task_id", "")))
+        if not isinstance(task, Mapping):
+            continue
+        context = task.get("context") or {}
+        retry_count = int(context.get("retry_count", 0) or 0) if isinstance(context, Mapping) else 0
+        topic = str(task.get("topic", "")).strip()
+        if topic and retry_count < 1 and topic.casefold() not in retry_counts:
+            retry_counts[topic.casefold()] = retry_count + 1
+            retry_topics.append(topic)
 
     epoch = max(int(state.get("deepsearch_epoch", 1)), 1)
     max_epochs = max(int(state.get("deepsearch_max_epochs", 3)), 1)
@@ -256,6 +284,10 @@ def coordinator_node(
         action = "complete"
         reasoning = "评估通过且没有未解决的研究缺口。"
         topics = []
+    elif retry_topics and can_research:
+        action = "research"
+        reasoning = "重试一次失败或无结果的研究分支，并与评估缺口一并补充。"
+        topics = list(dict.fromkeys([*retry_topics, *missing_topics]))
     elif not can_research and not can_revise:
         action = "complete"
         reasoning = "研究轮次和修订预算均已耗尽。"
@@ -382,7 +414,11 @@ def coordinator_node(
             next_epoch = min(epoch + 1, max_epochs)
             task_state["deepsearch_epoch"] = next_epoch
             result["deepsearch_epoch"] = next_epoch
-        result["research_tasks"] = _build_research_tasks(task_state, task_topics)
+        result["research_tasks"] = _build_research_tasks(
+            task_state,
+            task_topics,
+            retry_counts=retry_counts,
+        )
     return result
 
 

@@ -392,6 +392,7 @@ class ResearchTree:
         epoch: int | None = None,
         max_branches: int = 4,
         parent_id: str | None = None,
+        allow_existing: set[str] | None = None,
     ) -> list[str]:
         normalized_epoch = max(
             int(epoch or self.epoch),
@@ -427,7 +428,7 @@ class ResearchTree:
                 None,
             )
 
-            if existing is not None:
+            if existing is not None and key not in (allow_existing or set()):
                 continue
 
             node_id = _node_id(

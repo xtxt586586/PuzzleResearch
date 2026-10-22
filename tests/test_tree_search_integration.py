@@ -257,6 +257,68 @@ class TreeSearchIntegrationTests(unittest.TestCase):
             "task-followup-002",
         )
 
+    def test_retry_task_reopens_same_topic_in_a_new_epoch(self):
+        searched = []
+
+        def fake_search(state):
+            searched.append(state["query"])
+            return {
+                "search_results": [{
+                    "title": "补充证据",
+                    "url": "https://example.test/retry",
+                    "snippet": "重试后获取的证据",
+                }],
+                "sources": [],
+                "fetched_pages": [],
+                "passages": [],
+            }
+
+        prior_tree = ResearchTree.from_queries(
+            "研究主题",
+            ["成本对比"],
+            epoch=1,
+            max_branches=2,
+        )
+        prior_branch = next(
+            node for node in prior_tree.nodes.values() if node.depth == 1
+        )
+        prior_branch.mark_failed("provider timeout")
+
+        task = {
+            "task_id": "retry-cost-002",
+            "topic": "成本对比",
+            "objective": "重试失败研究方向",
+            "context": {"epoch": 2, "retry_count": 1},
+            "allowed_tools": ["web_search"],
+        }
+        with (
+            patch.object(settings, "deepsearch_tree_parallel_branches", 0),
+            patch("agent.workflows.nodes.ModelFactory.for_task", return_value=_Planner()),
+            patch("agent.workflows.nodes.search_node", side_effect=fake_search),
+        ):
+            result = deep_tree_search_node(
+                {
+                    "input": "研究主题",
+                    "research_plan": ["成本对比"],
+                    "research_tasks": [task],
+                    "research_tree": prior_tree.to_dict(),
+                    "deepsearch_epoch": 2,
+                },
+                {},
+            )
+
+        self.assertEqual(searched, ["成本对比"])
+        retry_result = next(
+            item for item in result["research_agent_results"]
+            if item["task_id"] == task["task_id"]
+        )
+        self.assertEqual(retry_result["status"], "completed")
+        epoch_nodes = [
+            node for node in result["research_tree"]["nodes"]
+            if node["query"] == "成本对比" and node["depth"] == 1
+        ]
+        self.assertEqual({node["epoch"] for node in epoch_nodes}, {1, 2})
+
     def test_failed_research_task_does_not_discard_successful_sibling(self):
         def fake_search(state):
             query = state["query"]
