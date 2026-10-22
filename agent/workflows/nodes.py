@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 import re
 import asyncio
@@ -72,6 +73,7 @@ from agent.workflows.viz_planner import (
     finalize_report_visualizations,
 )
 from agent.workflows.claim_verifier import ClaimStatus, ClaimVerifier
+from agent.workflows.planner_agent import PlannerAgent, PlannerTask
 from agent.workflows.role_agents import (
     VerifierAgent,
     VerifierTask,
@@ -1064,18 +1066,22 @@ def web_plan_node(
         )
 
         try:
-            llm = ModelFactory.for_task(
-                "planning",
-                temperature=0.2,
+            planned = PlannerAgent(ModelFactory.for_task).run(
+                PlannerTask(
+                    task_id=f"web-plan-{hashlib.sha1(user_input.encode('utf-8')).hexdigest()[:12]}",
+                    goal=user_input,
+                    mode="web",
+                    instructions="将用户问题拆解为互补、可搜索的研究查询。",
+                    context=user_input,
+                    max_queries=max_queries,
+                    messages=messages,
+                ),
                 config=config,
             )
-            response = llm.invoke(
-                messages,
-                config=config,
-            )
-
-            queries, reasoning = _parse_plan_response(response)
-            queries = queries[:max_queries]
+            if planned.status != "completed":
+                raise ValueError(planned.error or "PlannerAgent failed")
+            queries = [item.query for item in planned.queries]
+            reasoning = planned.reasoning
 
         except Exception as exc:
             print(f"{web_plan_node}查询规划失败，使用原问题：{exc}")
@@ -1196,22 +1202,26 @@ def deep_plan_node(
             reasoning = "规划请求将超出 token 预算，使用原始问题并停止后续研究。"
         else:
             try:
-                llm = ModelFactory.for_task(
-                    "planning",
-                    temperature=0.2,
+                planned = PlannerAgent(ModelFactory.for_task).run(
+                    PlannerTask(
+                        task_id=f"deep-plan-{hashlib.sha1(user_input.encode('utf-8')).hexdigest()[:12]}",
+                        goal=user_input,
+                        mode="deep",
+                        instructions="拆解深度研究主题，提出覆盖互补角度的可搜索问题。",
+                        context=user_input,
+                        max_queries=max_queries,
+                        messages=messages,
+                    ),
                     config=config,
                 )
-                response = llm.invoke(
-                    messages,
-                    config=config,
-                )
-
+                if planned.status != "completed":
+                    raise ValueError(planned.error or "PlannerAgent failed")
                 research_budget = add_budget_tokens(
                     research_budget,
-                    model_call_tokens(messages, response),
+                    planned.model_tokens,
                 )
-                queries, reasoning = _parse_plan_response(response)
-                queries = queries[:max_queries]
+                queries = [item.query for item in planned.queries]
+                reasoning = planned.reasoning
 
             except Exception as exc:
                 print(f"[deep_plan_node] 规划失败，使用原问题：{exc}")
@@ -1443,21 +1453,35 @@ def deep_followup_plan_node(
     )
     if can_call_model:
         try:
-            llm = ModelFactory.for_task(
-                "planning",
-                temperature=0.2,
+            planned = PlannerAgent(ModelFactory.for_task).run(
+                PlannerTask(
+                    task_id=(
+                        f"followup-plan-{current_epoch}-"
+                        f"{hashlib.sha1(user_input.encode('utf-8')).hexdigest()[:12]}"
+                    ),
+                    goal=user_input,
+                    mode="followup",
+                    instructions="根据知识缺口生成尚未搜索过的补充研究查询。",
+                    context="\n".join(
+                        [
+                            f"研究问题：{user_input}",
+                            f"知识缺口：{missing_topic_context}",
+                            f"已有查询：{history_text}",
+                        ]
+                    ),
+                    max_queries=max_queries,
+                    messages=messages,
+                ),
                 config=config,
             )
-            response = llm.invoke(
-                messages,
-                config=config,
-            )
-            research_budget = _record_research_model_usage(
+            if planned.status != "completed":
+                raise ValueError(planned.error or "PlannerAgent failed")
+            research_budget = add_budget_tokens(
                 research_budget,
-                messages,
-                response,
+                planned.model_tokens,
             )
-            candidates, reasoning = _parse_plan_response(response)
+            candidates = [item.query for item in planned.queries]
+            reasoning = planned.reasoning
 
         except Exception as exc:
             print(f"[deep_followup_plan_node] \n规划失败，使用缺口生成查询：{exc}")
