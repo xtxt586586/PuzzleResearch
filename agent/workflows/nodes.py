@@ -1034,12 +1034,6 @@ def web_plan_node(
         reasoning = "复用 Router 提供的搜索建议。"
 
     else:
-        llm = ModelFactory.for_task(
-            "planning",
-            temperature=0.2,
-            config=config,
-        )
-
         messages = [
             SystemMessage(
                 content=(
@@ -1070,6 +1064,11 @@ def web_plan_node(
         )
 
         try:
+            llm = ModelFactory.for_task(
+                "planning",
+                temperature=0.2,
+                config=config,
+            )
             response = llm.invoke(
                 messages,
                 config=config,
@@ -1157,12 +1156,6 @@ def deep_plan_node(
         )
 
     else:
-        llm = ModelFactory.for_task(
-            "planning",
-            temperature=0.2,
-            config=config,
-        )
-
         messages = [
             SystemMessage(
                 content=(
@@ -1203,6 +1196,11 @@ def deep_plan_node(
             reasoning = "规划请求将超出 token 预算，使用原始问题并停止后续研究。"
         else:
             try:
+                llm = ModelFactory.for_task(
+                    "planning",
+                    temperature=0.2,
+                    config=config,
+                )
                 response = llm.invoke(
                     messages,
                     config=config,
@@ -1403,12 +1401,6 @@ def deep_followup_plan_node(
         for query in query_history
     )
 
-    llm = ModelFactory.for_task(
-        "planning",
-        temperature=0.2,
-        config=config,
-    )
-
     messages = [
         SystemMessage(
             content=(
@@ -1451,6 +1443,11 @@ def deep_followup_plan_node(
     )
     if can_call_model:
         try:
+            llm = ModelFactory.for_task(
+                "planning",
+                temperature=0.2,
+                config=config,
+            )
             response = llm.invoke(
                 messages,
                 config=config,
