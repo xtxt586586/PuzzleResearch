@@ -7,6 +7,10 @@ from langgraph.types import Send
 
 from agent.core.state import AgentState
 from common.config import settings
+from agent.workflows.coordinator import (
+    coordinator_destination,
+    coordinator_node,
+)
 from agent.workflows.nodes import (
     direct_answer_node,
     finalize_node,
@@ -16,17 +20,24 @@ from agent.workflows.nodes import (
     web_plan_node,
     deep_plan_node,
     deep_followup_plan_node,
+    plan_review_node,
+    sources_review_node,
+    draft_review_node,
     search_node,
+    deep_linear_search_node,
+    deep_tree_search_node,
     writer_node,
     deep_writer_node,
     evaluator_node,
     revise_node,
     agent_tool_node,
     agent_plan_node,
+    agent_fast_path_node,
+    should_use_agent_fast_path,
 )
 
 
-def create_research_graph(checkpointer=None):
+def create_research_graph(checkpointer=None, store=None):
     """
     创建 PuzzleResearch 主研究图。
 
@@ -41,13 +52,13 @@ def create_research_graph(checkpointer=None):
           │          ↓
           │        writer
           │
-          ├── deep → deep_plan
-          │          ↓
-          │      parallel deep_search
-          │          ↓
-          │        deep_writer
-          │          ↓
-          │        evaluator
+        ├── deep → deep_plan
+        │          ↓
+        │      budgeted linear search or tree search
+        │          ↓
+        │        deep_writer
+        │          ↓
+        │        evaluator
           │
           └── agent → agent_plan ⇄ agent_tool → finalize
                                   ↑
@@ -55,6 +66,9 @@ def create_research_graph(checkpointer=None):
     """
 
     workflow = StateGraph(AgentState)
+    use_hierarchical_agents = bool(
+        getattr(settings, "use_hierarchical_agents", False)
+    )
 
     #注册节点
     workflow.add_node("router",router_node)
@@ -64,8 +78,12 @@ def create_research_graph(checkpointer=None):
     workflow.add_node("web_plan",web_plan_node)
     workflow.add_node("deep_plan",deep_plan_node)
     workflow.add_node("deep_followup",deep_followup_plan_node)
+    workflow.add_node("plan_review", plan_review_node)
+    workflow.add_node("sources_review", sources_review_node)
+    workflow.add_node("draft_review", draft_review_node)
     workflow.add_node("search",search_node)
-    workflow.add_node("deep_search",search_node)
+    workflow.add_node("deep_tree_search",deep_tree_search_node)
+    workflow.add_node("deep_search",deep_linear_search_node)
     workflow.add_node("clarify",clarify_node)
     workflow.add_node("agent_tool",agent_tool_node)
     workflow.add_node("writer",writer_node)
@@ -73,6 +91,9 @@ def create_research_graph(checkpointer=None):
     workflow.add_node("evaluator",evaluator_node)
     workflow.add_node("revise",revise_node)
     workflow.add_node("agent_plan",agent_plan_node)
+    workflow.add_node("agent_fast_path", agent_fast_path_node)
+    if use_hierarchical_agents:
+        workflow.add_node("coordinator", coordinator_node)
 
     #设置入口节点
     workflow.set_entry_point("router")
@@ -108,12 +129,18 @@ def create_research_graph(checkpointer=None):
             return "clarify"
 
         if route == "web":
+            if should_use_agent_fast_path(state):
+                return "agent_fast_path"
             return "web_plan"
 
         if route == "deep":
+            if use_hierarchical_agents:
+                return "coordinator"
             return "deep_plan"
 
         if route == "agent":
+            if should_use_agent_fast_path(state):
+                return "agent_fast_path"
             return "agent_plan"
 
         return "direct_answer"
@@ -159,6 +186,8 @@ def create_research_graph(checkpointer=None):
         if state.get("agent_finished"):
             return "human_review"
 
+        pending_tool_calls = state.get("pending_tool_calls") or []
+
         tool_call_count = max(
             int(state.get("tool_call_count", 0)),
             0,
@@ -177,7 +206,38 @@ def create_research_graph(checkpointer=None):
         if tool_call_count >= tool_call_limit:
             return "finalize"
 
+        if pending_tool_calls:
+            return "agent_tool"
+
         return "agent_plan"
+
+    def plan_review_dispatch(state: AgentState):
+        if (
+            state.get("is_cancelled")
+            or state.get("status") in {"cancelled", "failed"}
+        ):
+            return "finalize"
+        if state.get("route") == "web":
+            return fan_out_searches(state)
+        if state.get("route") == "deep":
+            return fan_out_deep_searches(state)
+        return "finalize"
+
+    def sources_review_dispatch(state: AgentState) -> str:
+        if (
+            state.get("is_cancelled")
+            or state.get("status") in {"cancelled", "failed"}
+        ):
+            return "finalize"
+        return "deep_writer" if state.get("route") == "deep" else "writer"
+
+    def draft_review_dispatch(state: AgentState) -> str:
+        if (
+            state.get("is_cancelled")
+            or state.get("status") in {"cancelled", "failed"}
+        ):
+            return "finalize"
+        return "evaluator"
 
 
 
@@ -191,9 +251,30 @@ def create_research_graph(checkpointer=None):
             "web_plan": "web_plan",
             "deep_plan": "deep_plan",
             "agent_plan": "agent_plan",
+            "agent_fast_path": "agent_fast_path",
             "finalize": "finalize",
+            **(
+                {"coordinator": "coordinator"}
+                if use_hierarchical_agents
+                else {}
+            ),
         },
     )
+
+    if use_hierarchical_agents:
+        workflow.add_conditional_edges(
+            "coordinator",
+            coordinator_destination,
+            {
+                "deep_plan": "deep_plan",
+                "deep_followup": "deep_followup",
+                "plan_review": "plan_review",
+                "deep_writer": "deep_writer",
+                "revise": "revise",
+                "human_review": "human_review",
+                "finalize": "finalize",
+            },
+        )
 
     #添加普通边
     workflow.add_edge("direct_answer","human_review")
@@ -207,44 +288,79 @@ def create_research_graph(checkpointer=None):
         },
     )
     workflow.add_conditional_edges(
+        "agent_fast_path",
+        lambda state: (
+            "agent_plan"
+            if state.get("agent_fast_path_fallback")
+            else "finalize"
+            if state.get("status") in {"failed", "cancelled"}
+            else "human_review"
+        ),
+        {
+            "agent_plan": "agent_plan",
+            "human_review": "human_review",
+            "finalize": "finalize",
+        },
+    )
+    workflow.add_conditional_edges(
         "agent_tool",
         agent_tool_decision,
         {
+            "agent_tool": "agent_tool",
             "finalize": "finalize",
             "agent_plan": "agent_plan",
             "human_review": "human_review",
         },
     )
+    workflow.add_edge("web_plan", "plan_review")
+    if use_hierarchical_agents:
+        workflow.add_edge("deep_plan", "coordinator")
+        workflow.add_edge("deep_followup", "coordinator")
+    else:
+        workflow.add_edge("deep_plan", "plan_review")
+        workflow.add_edge("deep_followup", "plan_review")
     workflow.add_conditional_edges(
-        "web_plan",
-        fan_out_searches,
-        ["search"],
-    )
-    workflow.add_conditional_edges(
-        "deep_plan",
-        fan_out_deep_searches,
-        ["deep_search"],
-    )
-    workflow.add_conditional_edges(
-        "deep_followup",
-        fan_out_deep_searches,
-        ["deep_search"],
+        "plan_review",
+        plan_review_dispatch,
+        ["finalize", "search", "deep_search", "deep_tree_search"],
     )
 
-    workflow.add_edge("search","writer")
-    workflow.add_edge("deep_search","deep_writer")
-    workflow.add_edge("writer","evaluator")
-    workflow.add_edge("deep_writer","evaluator")
+    workflow.add_edge("search", "sources_review")
+    workflow.add_edge("deep_search", "sources_review")
+    workflow.add_edge("deep_tree_search", "sources_review")
+    workflow.add_conditional_edges(
+        "sources_review",
+        sources_review_dispatch,
+        ["finalize", "writer", "deep_writer"],
+    )
+    workflow.add_edge("writer", "draft_review")
+    workflow.add_edge("deep_writer", "draft_review")
+    workflow.add_conditional_edges(
+        "draft_review",
+        draft_review_dispatch,
+        ["finalize", "evaluator"],
+    )
+    def after_evaluation(state: AgentState) -> str:
+        if use_hierarchical_agents and state.get("route") == "deep":
+            return "coordinator"
+        return evaluation_decision(state)
+
+    evaluator_targets = {
+        "deep_followup": "deep_followup",
+        "revise": "revise",
+        "human_review": "human_review",
+    }
+    if use_hierarchical_agents:
+        evaluator_targets["coordinator"] = "coordinator"
+
     workflow.add_conditional_edges(
         "evaluator",
-        evaluation_decision,
-        {
-            "deep_followup": "deep_followup",
-            "revise": "revise",
-            "human_review": "human_review",
-        },
+        after_evaluation,
+        evaluator_targets,
     )
-    workflow.add_edge("revise","evaluator")
+    # Match Weaver: human draft review applies to the writer's initial draft;
+    # automated revisions return directly to evaluation.
+    workflow.add_edge("revise", "evaluator")
     workflow.add_edge("human_review","finalize")
     workflow.add_edge("finalize",END)
 
@@ -252,6 +368,9 @@ def create_research_graph(checkpointer=None):
 
     if checkpointer is not None:
         compile_kwargs["checkpointer"] = checkpointer
+
+    if store is not None:
+        compile_kwargs["store"] = store
 
     return workflow.compile(**compile_kwargs)
 
@@ -309,6 +428,8 @@ def _fan_out_to_search_node(
             {
                 "query": query,
                 "search_mode": search_mode,
+                "domain": state.get("domain", "general"),
+                "domain_config": state.get("domain_config", {}),
             },
         )
         for query in queries
@@ -333,13 +454,31 @@ def fan_out_deep_searches(
         state: AgentState
 ) -> list[Send]:
     """
-    Deep Research 使用的并行搜索分发。
+    树模式使用专用探索节点，线性模式使用预算受控的批处理节点。
     """
-    return _fan_out_to_search_node(
-        state,
-        "deep_search",
-        "deep",
-    )
+    if (
+        bool(state.get("research_tasks"))
+        or (
+        bool(state.get("tree_exploration_enabled"))
+        and str(state.get("deepsearch_mode", "")).strip().lower() == "tree"
+        )
+    ):
+        return [
+            Send(
+                "deep_tree_search",
+                dict(state),
+            )
+        ]
+
+    return [
+        Send(
+            "deep_search",
+            {
+                **dict(state),
+                "search_mode": "deep",
+            },
+        )
+    ]
 
 
 
@@ -386,6 +525,24 @@ def evaluation_decision(
         1,
     )
 
+    artifacts = state.get("deepsearch_artifacts") or {}
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    budget = (
+        artifacts.get("research_budget")
+        or artifacts.get("linear_budget")
+        or artifacts.get("tree_budget")
+        or {}
+    )
+    if not isinstance(budget, dict):
+        budget = {}
+    budget_stop_reason = str(
+        state.get("budget_stop_reason")
+        or artifacts.get("budget_stop_reason")
+        or budget.get("stop_reason")
+        or ""
+    ).strip()
+
 
     revision_count = int(
         state.get("revision_count", 0)
@@ -397,10 +554,21 @@ def evaluation_decision(
     )
 
 
+    if route == "deep" and budget_stop_reason:
+        print(
+            "[evaluation_decision]",
+            "route=human_review",
+            f"budget_stop_reason={budget_stop_reason}",
+            "budget_exhausted=True",
+        )
+        return "human_review"
+
+
     if (
         route == "deep"
         and verdict == "revise"
         and deep_epoch < deep_max_epochs
+        and not budget_stop_reason
     ):
         print(
             "[evaluation_decision]",

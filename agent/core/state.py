@@ -6,6 +6,8 @@ from typing import Annotated,Any,Dict,List,Literal,Optional,TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+from agent.core.message_utils import is_conversation_summary, summarize_messages
+from agent.core.middleware import maybe_strip_tool_messages
 from common.config import settings
 
 
@@ -33,9 +35,8 @@ def capped_add_messages(
     # 使用 LangGraph 官方的消息合并函数。
     # 它会正确处理消息 ID、消息覆盖和消息追加。
     merged = add_messages(existing_messages, new_messages)
+    merged = maybe_strip_tool_messages(merged)
 
-    # 当前配置类中还没有正式加入这些字段，
-    # 因此使用 getattr 提供默认值，避免导入时出错。
     trim_enabled = bool(getattr(settings, "trim_messages", True))
 
     if not trim_enabled:
@@ -50,17 +51,39 @@ def capped_add_messages(
         0,
     )
 
-    # 消息数量没有超过限制时，不需要裁剪。
+    summary_enabled = bool(getattr(settings, "summary_messages", False))
+    summaries = [message for message in merged if is_conversation_summary(message)]
+    history = [message for message in merged if not is_conversation_summary(message)]
+
+    if summary_enabled:
+        trigger = max(int(getattr(settings, "summary_messages_trigger", 20)), 1)
+        if len(history) > trigger and len(history) > keep_first + keep_last:
+            head = history[:keep_first] if keep_first else []
+            tail = history[-keep_last:] if keep_last else []
+            middle_end = len(history) - keep_last if keep_last else len(history)
+            middle = history[keep_first:middle_end]
+            summary = summarize_messages([*summaries, *middle])
+            return [*head, summary, *tail]
+
+        if summaries:
+            insertion_index = min(keep_first, len(history))
+            return [
+                *history[:insertion_index],
+                *summaries,
+                *history[insertion_index:],
+            ]
+
+        # 摘要尚未达到触发阈值前先保留历史，避免过早丢弃可摘要内容。
+        return history
+
     if len(merged) <= keep_first + keep_last:
         return merged
 
-    # 如果配置为不保留任何消息，则返回空列表。
-    if keep_last + keep_first == 0:
+    if keep_first + keep_last == 0:
         return []
 
     head = merged[:keep_first] if keep_first else []
     tail = merged[-keep_last:] if keep_last else []
-
     return head + tail
 
 
@@ -127,7 +150,14 @@ class AgentState(TypedDict,total=False):
         capped_add_messages,
     ]
 
+    # 完整 UI 对话归档，不参与模型上下文裁剪。
+    conversation_history: List[Dict[str, str]]
+
     research_plan: List[str]
+    research_tasks: List[Dict[str, Any]]
+    research_agent_results: List[Dict[str, Any]]
+    plan_reviewed: bool
+    human_guidance: str
     current_step: int
     status: ExecutionStatus
     is_complete: bool
@@ -150,6 +180,16 @@ class AgentState(TypedDict,total=False):
     # ========== 研究数据 ==========
 
     scraped_content: Annotated[
+        List[Dict[str,Any]],
+        operator.add,
+    ]
+
+    fetched_pages: Annotated[
+        List[Dict[str,Any]],
+        operator.add,
+    ]
+
+    passages: Annotated[
         List[Dict[str,Any]],
         operator.add,
     ]
@@ -178,6 +218,7 @@ class AgentState(TypedDict,total=False):
     verdict: str
     eval_dimensions: Dict[str,float]
     missing_topics: List[str]
+    knowledge_gap_analysis: Dict[str,Any]
 
     revision_count: int
     max_revisions: int
@@ -193,6 +234,7 @@ class AgentState(TypedDict,total=False):
     tool_approved: bool
     agent_finished: bool
     pending_tool_calls: List[Dict[str,Any]]
+    agent_tool_candidates: List[str]
     tool_call_count: int
     tool_call_limit: int
     enabled_tools: Dict[str,bool]
@@ -251,6 +293,7 @@ class AgentState(TypedDict,total=False):
 
     deepsearch_artifacts: Dict[str,Any]
     deepsearch_mode: str
+    budget_stop_reason: str
 
     #当前是第几轮 Deep Research。
     deepsearch_epoch: int
@@ -271,6 +314,9 @@ class AgentState(TypedDict,total=False):
 
     continuation_needed: bool
     xml_tool_calls_detected: bool
+    agent_fast_path: bool
+    agent_fast_path_fallback: bool
+    agent_performance: Dict[str, Any]
 
 
 class ResearchPlan(TypedDict):
@@ -310,3 +356,5 @@ class QueryState(TypedDict):
 
     query: str
     search_mode: Literal["web", "deep"]
+    domain: str
+    domain_config: Dict[str, Any]

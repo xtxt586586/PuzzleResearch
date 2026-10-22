@@ -1,0 +1,340 @@
+import unittest
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from agent.core.graph import create_research_graph
+from agent.workflows.coordinator import (
+    coordinator_destination,
+    coordinator_node,
+)
+from common.config import settings
+
+
+class CoordinatorTests(unittest.TestCase):
+    def _reviewed_state(self, **overrides):
+        state = {
+            "input": "比较两种方案",
+            "route": "deep",
+            "research_plan": ["方案一", "方案二"],
+            "search_results": [{"url": "https://example.com"}],
+            "draft_report": "已有报告",
+            "final_report": "已有报告",
+            "verdict": "revise",
+            "evaluation": "还缺少成本对比",
+            "missing_topics": ["成本对比"],
+            "deepsearch_epoch": 1,
+            "deepsearch_max_epochs": 3,
+            "revision_count": 0,
+            "max_revisions": 2,
+        }
+        state.update(overrides)
+        return state
+
+    def test_initial_state_plans_without_calling_model(self):
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("initial planning is deterministic"),
+        ):
+            result = coordinator_node(
+                {
+                    "input": "研究一个主题",
+                    "research_plan": [],
+                },
+                {},
+            )
+
+        self.assertEqual(result["coordinator_action"], "plan")
+        self.assertEqual(
+            coordinator_destination(
+                {"coordinator_action": "plan", "research_plan": []}
+            ),
+            "deep_plan",
+        )
+
+    def test_passed_report_completes_without_calling_model(self):
+        state = self._reviewed_state(
+            verdict="pass",
+            missing_topics=[],
+        )
+
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("a passing report needs no decision call"),
+        ):
+            result = coordinator_node(state, {})
+
+        self.assertEqual(result["coordinator_action"], "complete")
+        self.assertEqual(
+            coordinator_destination(result),
+            "human_review",
+        )
+
+    def test_model_can_choose_followup_research_and_prioritize_topics(self):
+        model = SimpleNamespace(
+            invoke=lambda messages, config=None: SimpleNamespace(
+                content=(
+                    'Decision: {"action":"research",'
+                    '"reasoning":"补足成本证据",'
+                    '"priority_topics":["成本对比","长期维护"]}'
+                )
+            )
+        )
+
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = coordinator_node(self._reviewed_state(), {})
+
+        self.assertEqual(result["coordinator_action"], "research")
+        self.assertEqual(
+            result["missing_topics"],
+            ["成本对比", "长期维护"],
+        )
+        self.assertEqual(
+            coordinator_destination(result),
+            "plan_review",
+        )
+        self.assertEqual(
+            [task["topic"] for task in result["research_tasks"]],
+            ["成本对比", "长期维护"],
+        )
+        self.assertEqual(result["research_tasks"][0]["priority"], 5)
+        self.assertEqual(result["research_tasks"][0]["allowed_tools"], ["web_search"])
+        self.assertEqual(
+            result["research_tasks"][0]["context"]["focus_topic"],
+            "成本对比",
+        )
+
+    def test_coordinator_model_usage_is_added_to_shared_budget(self):
+        model = SimpleNamespace(
+            invoke=lambda messages, config=None: SimpleNamespace(
+                content=(
+                    '{"action":"research","reasoning":"继续补充",'
+                    '"priority_topics":["成本对比"]}'
+                ),
+                usage_metadata={"total_tokens": 19},
+            )
+        )
+
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = coordinator_node(self._reviewed_state(), {})
+
+        self.assertGreaterEqual(
+            result["deepsearch_artifacts"]["research_budget"]["tokens_used"],
+            19,
+        )
+        self.assertEqual(
+            result["deepsearch_tokens_used"],
+            result["deepsearch_artifacts"]["research_budget"]["tokens_used"],
+        )
+        self.assertEqual(
+            result["deepsearch_artifacts"]["quality_summary"]["tokens_used"],
+            result["deepsearch_tokens_used"],
+        )
+
+    def test_followup_dispatch_increments_epoch_and_task_identity(self):
+        state = self._reviewed_state()
+        model = SimpleNamespace(
+            invoke=lambda messages, config=None: SimpleNamespace(
+                content=(
+                    '{"action":"research","reasoning":"补充",'
+                    '"priority_topics":["成本对比"]}'
+                )
+            )
+        )
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            return_value=model,
+        ):
+            first = coordinator_node(state, {})
+            second = coordinator_node(
+                {**state, "deepsearch_epoch": 2},
+                {},
+            )
+
+        self.assertEqual(first["deepsearch_epoch"], 2)
+        self.assertEqual(second["deepsearch_epoch"], 3)
+        self.assertNotEqual(
+            first["research_tasks"][0]["task_id"],
+            second["research_tasks"][0]["task_id"],
+        )
+
+    def test_task_count_respects_tree_branch_limit(self):
+        state = self._reviewed_state(
+            missing_topics=[f"缺口 {index}" for index in range(8)],
+        )
+        model = SimpleNamespace(
+            invoke=lambda messages, config=None: SimpleNamespace(
+                content=(
+                    '{"action":"research","reasoning":"补充",'
+                    '"priority_topics":' + json.dumps(state["missing_topics"], ensure_ascii=False) + "}"
+                )
+            )
+        )
+        with (
+            patch.object(settings, "deepsearch_tree_max_branches", 2),
+            patch("agent.workflows.coordinator.ModelFactory.for_task", return_value=model),
+        ):
+            result = coordinator_node(state, {})
+        self.assertEqual(len(result["research_tasks"]), 2)
+
+    def test_exhausted_budget_routes_existing_evidence_to_writer(self):
+        state = self._reviewed_state(
+            draft_report="",
+            final_report="",
+            deepsearch_artifacts={
+                "research_budget": {
+                    "tokens_used": 50,
+                    "elapsed_seconds": 2.0,
+                    "searches_used": 1,
+                }
+            },
+        )
+
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("the exhausted budget skips coordination"),
+        ):
+            result = coordinator_node(
+                state,
+                {"configurable": {"deepsearch_max_tokens": 20}},
+            )
+
+        self.assertEqual(result["coordinator_action"], "synthesize")
+        self.assertEqual(
+            coordinator_destination({**state, **result}),
+            "deep_writer",
+        )
+
+    def test_exhausted_research_budget_does_not_call_revision_model(self):
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("no model call needed after budget exhaustion"),
+        ):
+            result = coordinator_node(
+                self._reviewed_state(
+                    deepsearch_epoch=3,
+                    deepsearch_max_epochs=3,
+                    deepsearch_artifacts={
+                        "research_budget": {
+                            "stop_reason": "time_budget_exceeded",
+                        },
+                    },
+                ),
+                {},
+            )
+
+        self.assertEqual(result["coordinator_action"], "complete")
+        self.assertEqual(
+            coordinator_destination(
+                {
+                    **self._reviewed_state(
+                        deepsearch_epoch=3,
+                        deepsearch_max_epochs=3,
+                    ),
+                    **result,
+                }
+            ),
+            "human_review",
+        )
+
+    def test_model_failure_uses_budget_safe_research_fallback(self):
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=RuntimeError("model unavailable"),
+        ):
+            result = coordinator_node(self._reviewed_state(), {})
+
+        self.assertEqual(result["coordinator_action"], "research")
+        self.assertIn(
+            "协调器不可用",
+            result["coordinator_reasoning"],
+        )
+
+    def test_graph_registers_coordinator_only_when_enabled(self):
+        with patch.object(settings, "use_hierarchical_agents", False):
+            default_graph = create_research_graph()
+        self.assertNotIn("coordinator", default_graph.get_graph().nodes)
+
+        with patch.object(settings, "use_hierarchical_agents", True):
+            hierarchical_graph = create_research_graph()
+        self.assertIn("coordinator", hierarchical_graph.get_graph().nodes)
+
+    def test_hierarchical_graph_coordinates_a_deep_research_run(self):
+        def fake_router(state, config=None):
+            return {"route": "deep", "status": "running"}
+
+        def fake_plan(state, config=None):
+            return {
+                "research_plan": ["研究方案"],
+                "deepsearch_epoch": 1,
+                "deepsearch_max_epochs": 2,
+                "revision_count": 0,
+                "max_revisions": 1,
+            }
+
+        def fake_search(state, config=None):
+            return {
+                "search_results": [
+                    {
+                        "title": "来源",
+                        "url": "https://example.com/source",
+                        "snippet": "研究证据",
+                    }
+                ],
+                "sources": [
+                    {
+                        "title": "来源",
+                        "url": "https://example.com/source",
+                    }
+                ],
+            }
+
+        def fake_writer(state, config=None):
+            return {
+                "draft_report": "带有来源的研究报告",
+                "final_report": "带有来源的研究报告",
+            }
+
+        def fake_evaluator(state, config=None):
+            return {
+                "verdict": "pass",
+                "missing_topics": [],
+            }
+
+        with (
+            patch.object(settings, "use_hierarchical_agents", True),
+            patch("agent.core.graph.router_node", side_effect=fake_router),
+            patch("agent.core.graph.deep_plan_node", side_effect=fake_plan),
+            patch("agent.core.graph.search_node", side_effect=fake_search),
+            patch("agent.core.graph.deep_writer_node", side_effect=fake_writer),
+            patch("agent.core.graph.evaluator_node", side_effect=fake_evaluator),
+            patch("agent.core.graph.human_review_node", return_value={}),
+        ):
+            result = create_research_graph().invoke(
+                {
+                    "input": "研究一个主题",
+                    "messages": [],
+                }
+            )
+
+        self.assertEqual(result["route"], "deep")
+        self.assertEqual(result["coordinator_action"], "complete")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            result["final_report"],
+            "带有来源的研究报告",
+        )
+        self.assertEqual(
+            [task["topic"] for task in result["research_tasks"]],
+            ["研究方案"],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
