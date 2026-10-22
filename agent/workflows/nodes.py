@@ -378,17 +378,24 @@ def _parse_plan_response(
     seen: set[str] = set()
 
     for item in raw_queries:
-        query = str(item).strip()
+        query = _normalize_planner_query(item)
+        query_key = query.casefold()
 
-        if query and query not in seen:
+        if query and query_key not in seen:
             queries.append(query)
-            seen.add(query)
+            seen.add(query_key)
 
     reasoning = str(
         data.get("reasoning", "")
     ).strip()
 
     return queries, reasoning
+
+
+def _normalize_planner_query(value: Any) -> str:
+    """Normalize one planner query before it becomes a research branch."""
+
+    return " ".join(str(value or "").strip().split())[:500]
 
 
 
@@ -1012,11 +1019,12 @@ def web_plan_node(
     seen: set[str] = set()
 
     for item in suggested_queries:
-        query = str(item).strip()
+        query = _normalize_planner_query(item)
+        query_key = query.casefold()
 
-        if query and query not in seen:
+        if query and query_key not in seen:
             queries.append(query)
-            seen.add(query)
+            seen.add(query_key)
 
     reasoning = ""
 
@@ -1131,11 +1139,12 @@ def deep_plan_node(
     queries: list[str] = []
     seen: set[str] = set()
     for item in suggested_queries:
-        query = str(item).strip()
+        query = _normalize_planner_query(item)
+        query_key = query.casefold()
 
-        if query and query not in seen:
+        if query and query_key not in seen:
             queries.append(query)
-            seen.add(query)
+            seen.add(query_key)
 
     reasoning = ""
 
@@ -1363,7 +1372,10 @@ def deep_followup_plan_node(
 
     query_history = merge_query_history(
         [],
-        state.get("deepsearch_query_history") or [],
+        [
+            _normalize_planner_query(query)
+            for query in (state.get("deepsearch_query_history") or [])
+        ],
     )
     query_history_keys = {query.casefold() for query in query_history}
 
@@ -1459,7 +1471,7 @@ def deep_followup_plan_node(
     queries: list[str] = []
 
     for query in candidates:
-        normalized_query = str(query or "").strip()
+        normalized_query = _normalize_planner_query(query)
         query_key = normalized_query.casefold()
         if normalized_query and query_key not in query_history_keys:
             queries.append(normalized_query)
@@ -1471,7 +1483,7 @@ def deep_followup_plan_node(
 
     if not queries:
         for suggested_query in suggested_gap_queries:
-            fallback_query = str(suggested_query or "").strip()
+            fallback_query = _normalize_planner_query(suggested_query)
             query_key = fallback_query.casefold()
             if fallback_query and query_key not in query_history_keys:
                 queries.append(fallback_query)
@@ -1482,9 +1494,9 @@ def deep_followup_plan_node(
 
     if not queries:
         for topic in missing_topics:
-            fallback_query = (
+            fallback_query = _normalize_planner_query(
                 f"{user_input} {topic}"
-            ).strip()
+            )
 
             query_key = fallback_query.casefold()
             if fallback_query and query_key not in query_history_keys:
