@@ -30,6 +30,14 @@ CoordinatorAction = Literal[
     "complete",
 ]
 
+
+def _retry_count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 _ACTIONS = {
     "plan",
     "research",
@@ -159,9 +167,8 @@ def _build_research_tasks(
                 ],
                 "known_gaps": [str(item)[:500] for item in (state.get("missing_topics") or [])[:8]],
                 "epoch": max(int(state.get("deepsearch_epoch", 1) or 1), 1),
-                "retry_count": max(
-                    0,
-                    int((retry_counts or {}).get(normalized.casefold(), 0) or 0),
+                "retry_count": _retry_count(
+                    (retry_counts or {}).get(normalized.casefold(), 0)
                 ),
             },
             "allowed_tools": ["web_search"],
@@ -240,7 +247,11 @@ def coordinator_node(
         if not isinstance(task, Mapping):
             continue
         context = task.get("context") or {}
-        retry_count = int(context.get("retry_count", 0) or 0) if isinstance(context, Mapping) else 0
+        retry_count = (
+            _retry_count(context.get("retry_count", 0))
+            if isinstance(context, Mapping)
+            else 0
+        )
         topic = str(task.get("topic", "")).strip()
         if topic and retry_count < 1 and topic.casefold() not in retry_counts:
             retry_counts[topic.casefold()] = retry_count + 1

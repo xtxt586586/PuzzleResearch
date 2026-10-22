@@ -208,6 +208,31 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(result["research_tasks"][0]["context"]["retry_count"], 1)
         self.assertEqual(result["deepsearch_epoch"], 2)
 
+    def test_invalid_checkpoint_retry_count_defaults_to_first_attempt(self):
+        state = self._reviewed_state(
+            draft_report="",
+            final_report="",
+            search_results=[],
+            research_tasks=[{
+                "task_id": "research-invalid-retry",
+                "topic": "成本对比",
+                "context": {"retry_count": "unknown"},
+            }],
+            research_agent_results=[{
+                "task_id": "research-invalid-retry",
+                "status": "failed",
+                "error": "provider timeout",
+            }],
+        )
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("retry dispatch is deterministic"),
+        ):
+            result = coordinator_node(state, {})
+
+        self.assertEqual(result["coordinator_action"], "research")
+        self.assertEqual(result["research_tasks"][0]["context"]["retry_count"], 1)
+
     def test_failed_first_attempt_without_evidence_retries_in_a_new_epoch(self):
         state = self._reviewed_state(
             draft_report="",
