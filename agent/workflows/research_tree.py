@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import inspect
 import json
 import logging
 import threading
@@ -916,13 +917,20 @@ class TreeExplorer:
                 self.budget_stop_reason = "search_budget_exceeded"
                 raise TreeExplorationBudgetExceeded("search_budget_exceeded")
             self.search_count += 1
+        payload = {"query": query, "max_results": max_results}
+        search_kwargs: dict[str, Any] = {}
         try:
-            raw = self.search_func(
-                {"query": query, "max_results": max_results},
-                config=self.config,
-            )
-        except TypeError:
-            raw = self.search_func({"query": query, "max_results": max_results})
+            parameters = inspect.signature(self.search_func).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "config" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            search_kwargs["config"] = self.config
+        elif "config_payload" in parameters:
+            search_kwargs["config_payload"] = self.config
+        raw = self.search_func(payload, **search_kwargs)
         self._check_cancel(state)
         results = raw.get("results", []) if isinstance(raw, dict) else raw
         normalized_results = [
