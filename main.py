@@ -858,6 +858,7 @@ class RunMetricsResponse(BaseModel):
     ended_at: str | None = None
     duration_ms: float
     event_count: int
+    model_call_count: int = 0
     nodes_started: dict[str, int]
     nodes_completed: dict[str, int]
     errors: list[str]
@@ -3044,6 +3045,7 @@ async def _iter_chat_events(
             run_metrics.mark_event(
                 runtime_event.event,
                 runtime_event.name,
+                event_run_id=runtime_event.run_id,
             )
 
             if trace_context is not None:

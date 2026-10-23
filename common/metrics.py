@@ -18,6 +18,8 @@ class RunMetrics:
     ended_at: datetime | None = None
     duration_ms: float = 0.0
     event_count: int = 0
+    model_call_count: int = 0
+    _model_run_ids: set[str] = field(default_factory=set, repr=False)
     nodes_started: dict[str, int] = field(default_factory=dict)
     nodes_completed: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
@@ -27,8 +29,16 @@ class RunMetrics:
         self,
         event_type: str,
         node_name: str | None = None,
+        event_run_id: str | None = None,
     ) -> None:
         self.event_count += 1
+
+        if event_type in {"on_chat_model_start", "on_llm_start"}:
+            model_run_id = str(event_run_id or "")
+            if not model_run_id or model_run_id not in self._model_run_ids:
+                self.model_call_count += 1
+                if model_run_id:
+                    self._model_run_ids.add(model_run_id)
 
         if not node_name:
             return
@@ -71,6 +81,7 @@ class RunMetrics:
                 2,
             ),
             "event_count": self.event_count,
+            "model_call_count": self.model_call_count,
             "nodes_started": dict(self.nodes_started),
             "nodes_completed": dict(self.nodes_completed),
             "errors": list(self.errors),
