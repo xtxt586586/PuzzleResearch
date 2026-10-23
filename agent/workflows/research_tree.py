@@ -19,6 +19,7 @@ from common.config import settings
 from agent.workflows.research_budget import (
     DEFAULT_DEEPSEARCH_MAX_SECONDS,
     DEFAULT_DEEPSEARCH_MAX_TOKENS,
+    estimate_tokens,
 )
 from common.cancellation import check_state_cancellation
 
@@ -44,8 +45,7 @@ class TreeExplorationBudgetExceeded(Exception):
 
 
 def _estimate_tokens(value: Any) -> int:
-    text = value if isinstance(value, str) else str(value or "")
-    return (len(text) + 3) // 4 if text else 0
+    return estimate_tokens(value)
 
 
 def _reported_token_usage(response: Any) -> int | None:

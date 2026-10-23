@@ -389,10 +389,10 @@ class ResearchTaskCheckpointTests(unittest.TestCase):
                 {"configurable": {"deepsearch_tree_parallel_branches": 4}},
             )
 
-        # 60% of the global budget is divided across all assigned tasks.
+        # Half the global budget is reserved for independent research workers.
         self.assertEqual(
             branch_configs[0]["configurable"]["deepsearch_max_tokens"],
-            1500,
+            1250,
         )
 
     def test_aggregate_stops_when_combined_worker_usage_reaches_global_budget(self):

@@ -172,7 +172,7 @@ def research_task_worker_node(
     elapsed = max(float(prior_budget.get("elapsed_seconds", 0) or 0), 0.0)
     tokens = max(int(prior_budget.get("tokens_used", 0) or 0), 0)
     # Keep room for planning, coordination, writing, and evaluation calls.
-    research_token_ceiling = max(1, int(max_tokens * 0.6))
+    research_token_ceiling = max(1, int(max_tokens * 0.5))
     token_share = max(1, (research_token_ceiling - tokens) // worker_count)
     seconds_share = max(0.1, (max_seconds - elapsed) / worker_count)
 
