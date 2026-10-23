@@ -110,6 +110,25 @@ def merge_unique_items(
     return merged
 
 
+def merge_research_task_checkpoints(
+    existing: List[Dict[str, Any]] | None,
+    new: List[Dict[str, Any]] | None,
+) -> List[Dict[str, Any]]:
+    """Merge durable worker writes by task ID, with explicit tombstones."""
+    merged: Dict[str, Dict[str, Any]] = {}
+    for item in [*(existing or []), *(new or [])]:
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("task_id", "")).strip()
+        if not task_id:
+            continue
+        if item.get("_clear"):
+            merged.pop(task_id, None)
+        else:
+            merged[task_id] = item
+    return list(merged.values())
+
+
 ExecutionStatus = Literal[
     "pending",
     "running",
@@ -156,6 +175,15 @@ class AgentState(TypedDict,total=False):
     research_plan: List[str]
     research_tasks: List[Dict[str, Any]]
     research_agent_results: List[Dict[str, Any]]
+    research_task_parallel_limit: int
+    research_task_attempted_ids: Annotated[
+        List[str],
+        operator.add,
+    ]
+    research_task_checkpoints: Annotated[
+        List[Dict[str, Any]],
+        merge_research_task_checkpoints,
+    ]
     writer_agent_result: Dict[str, Any]
     verifier_agent_result: Dict[str, Any]
     plan_reviewed: bool
