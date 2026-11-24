@@ -434,6 +434,44 @@ class TreeSearchIntegrationTests(unittest.TestCase):
                 )
         search.assert_not_called()
 
+    def test_assigned_tasks_skip_redundant_single_branch_merge_model_call(self):
+        def fake_search(state):
+            return {
+                "search_results": [{
+                    "title": "子任务来源",
+                    "url": "https://example.test/assigned-task",
+                    "snippet": "子任务证据",
+                    "provider": "fake",
+                }],
+                "sources": [],
+            }
+
+        task = {
+            "task_id": "assigned-summary-task",
+            "topic": "独立研究子任务",
+            "allowed_tools": ["web_search"],
+        }
+        with (
+            patch.object(settings, "deepsearch_tree_max_depth", 0),
+            patch("agent.workflows.nodes.ModelFactory.for_task", return_value=_Planner()),
+            patch("agent.workflows.nodes.search_node", side_effect=fake_search),
+            patch(
+                "agent.workflows.nodes.TreeExplorer.get_final_summary",
+                side_effect=AssertionError("assigned task must not run a merge call"),
+            ),
+        ):
+            result = deep_tree_search_node(
+                {
+                    "input": "总研究问题",
+                    "research_tasks": [task],
+                    "deepsearch_epoch": 1,
+                },
+                {},
+            )
+
+        self.assertIn("独立研究子任务", result["summary_notes"][0])
+        self.assertEqual(len(result["research_agent_results"]), 1)
+
     def test_cancel_during_search_prevents_branch_summary_and_next_task(self):
         token_id = f"research-cancel-{uuid.uuid4().hex}"
         token = cancellation_manager.create_token_sync(token_id)

@@ -166,6 +166,20 @@ class ResearchTaskCheckpointTests(unittest.TestCase):
 
         self.assertEqual(result, "sources_review")
 
+    def test_dispatch_stops_at_reserved_research_budget_ceiling(self):
+        result = fan_out_research_tasks({
+            "research_tasks": [{"task_id": "pending", "topic": "Do not run"}],
+            "deepsearch_artifacts": {
+                "research_budget": {
+                    "tokens_used": 5000,
+                    "max_tokens": 10000,
+                    "stop_reason": "",
+                },
+            },
+        })
+
+        self.assertEqual(result, "sources_review")
+
     def test_worker_batches_respect_parallel_branch_limit(self):
         calls = []
 
@@ -319,6 +333,7 @@ class ResearchTaskCheckpointTests(unittest.TestCase):
                     "max_seconds": 300,
                     "searches_used": 0,
                     "stop_reason": "",
+                    "token_usage_by_stage": {"planner": 40},
                 },
             },
             "research_task_checkpoints": [{
@@ -337,6 +352,7 @@ class ResearchTaskCheckpointTests(unittest.TestCase):
                             "max_seconds": 60,
                             "searches_used": 3,
                             "stop_reason": "token_budget_exceeded",
+                            "token_usage_by_stage": {"search_context": 250},
                         },
                     },
                 },
@@ -353,6 +369,10 @@ class ResearchTaskCheckpointTests(unittest.TestCase):
         self.assertEqual(
             result["deepsearch_artifacts"]["research_budget"]["branch_stop_reasons"],
             [{"task_id": "task-a", "reason": "token_budget_exceeded"}],
+        )
+        self.assertEqual(
+            result["deepsearch_artifacts"]["research_budget"]["token_usage_by_stage"],
+            {"planner": 40, "search_context": 250},
         )
 
     def test_worker_token_share_reserves_budget_for_non_research_roles(self):
@@ -378,6 +398,10 @@ class ResearchTaskCheckpointTests(unittest.TestCase):
 
         def capture_branch(state, config):
             branch_configs.append(config)
+            self.assertEqual(
+                state["deepsearch_artifacts"]["research_budget"]["max_tokens"],
+                config["configurable"]["deepsearch_max_tokens"],
+            )
             return {}
 
         with (
@@ -389,11 +413,32 @@ class ResearchTaskCheckpointTests(unittest.TestCase):
                 {"configurable": {"deepsearch_tree_parallel_branches": 4}},
             )
 
-        # Half the global budget is reserved for independent research workers.
+        # Workers use a bounded share so writing and evaluation retain time.
         self.assertEqual(
             branch_configs[0]["configurable"]["deepsearch_max_tokens"],
-            1250,
+            875,
         )
+        self.assertEqual(
+            branch_configs[0]["configurable"]["deepsearch_max_seconds"],
+            45,
+        )
+
+    def test_dispatch_stops_after_research_time_reservation(self):
+        state = {
+            "input": "topic",
+            "research_tasks": [{"task_id": "task-a", "topic": "Task A"}],
+            "deepsearch_artifacts": {
+                "research_budget": {
+                    "tokens_used": 0,
+                    "max_tokens": 10000,
+                    "elapsed_seconds": 72,
+                    "max_seconds": 120,
+                    "stop_reason": "",
+                },
+            },
+        }
+
+        self.assertEqual(fan_out_research_tasks(state), "sources_review")
 
     def test_aggregate_stops_when_combined_worker_usage_reaches_global_budget(self):
         task = {"task_id": "task-a", "topic": "One research task"}

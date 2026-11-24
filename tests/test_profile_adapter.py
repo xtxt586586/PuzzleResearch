@@ -63,6 +63,7 @@ class ProfileAdapterTests(unittest.TestCase):
                     "deduplicate_tool_calls": True,
                     "cache_tool_results": True,
                     "max_tool_result_chars": 1000,
+                    "browser_context_helper": True,
                 }
             },
         )
@@ -92,6 +93,7 @@ class ProfileAdapterTests(unittest.TestCase):
             profile.max_tool_result_chars,
             1000,
         )
+        self.assertTrue(profile.browser_context_helper)
 
     def test_invalid_runtime_policy_is_rejected(self):
         record = AgentRecord(
@@ -123,6 +125,31 @@ class ProfileAdapterTests(unittest.TestCase):
             profile.model,
             "deepseek-reasoner",
         )
+
+    def test_agent_mcp_flags_map_to_selected_server_ids(self):
+        record = AgentRecord(
+            id="limited-mcp-agent",
+            name="Limited MCP Agent",
+            mcp_servers={
+                "filesystem": True,
+                "memory": False,
+            },
+        )
+
+        profile = runtime_profile_from_record(record)
+
+        self.assertEqual(profile.mcp_servers, frozenset({"filesystem"}))
+
+    def test_missing_agent_mcp_selection_inherits_global_servers(self):
+        record = AgentRecord(
+            id="inherit-mcp-agent",
+            name="Inherit MCP Agent",
+            mcp_servers=None,
+        )
+
+        profile = runtime_profile_from_record(record)
+
+        self.assertIsNone(profile.mcp_servers)
 
 
 if __name__ == "__main__":

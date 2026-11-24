@@ -17,6 +17,8 @@ from agent.core.event_stream import (
 import main
 import json
 from agent.core.events import RuntimeEvent
+from langchain_core.messages import AIMessageChunk
+from langgraph.checkpoint.memory import InMemorySaver
 from main import app
 
 
@@ -39,6 +41,54 @@ class PublicApiTests(unittest.TestCase):
         )
         self.assertEqual(payload["version"], "0.1.0")
 
+    def test_resume_response_preserves_runtime_execution_status(self):
+        payload = main._resume_result_response(
+            "thread-resume-status-001",
+            {
+                "status": "failed",
+                "final_report": "编辑后的参数无效。",
+            },
+        )
+
+        self.assertEqual(payload["execution_status"], "failed")
+        self.assertEqual(payload["content"], "编辑后的参数无效。")
+
+    def test_export_preview_origin_passes_cors_preflight(self):
+        response = self.client.options(
+            "/api/export/thread-001?format=markdown",
+            headers={
+                "Origin": "http://localhost:3101",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "http://localhost:3101",
+        )
+
+    def test_local_frontend_origins_pass_cors_preflight(self):
+        for origin in (
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ):
+            with self.subTest(origin=origin):
+                response = self.client.options(
+                    "/api/triggers",
+                    headers={
+                        "Origin": origin,
+                        "Access-Control-Request-Method": "GET",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.headers["access-control-allow-origin"],
+                    origin,
+                )
+
     def test_health_returns_runtime_snapshot(self):
         response = self.client.get("/health")
 
@@ -59,6 +109,145 @@ class PublicApiTests(unittest.TestCase):
             float,
         )
         self.assertTrue(payload["timestamp"])
+
+    def test_readiness_reports_configured_memory_backends(self):
+        with patch.object(main.settings, "database_url", ""), patch.object(
+            main.settings,
+            "memory_store_backend",
+            "memory",
+        ), patch.object(main, "chat_checkpointer", InMemorySaver()), patch.object(
+            main,
+            "langgraph_store_available",
+            True,
+        ):
+            response = self.client.get("/ready")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["checks"],
+            {
+                "chat_checkpointer": "memory",
+                "long_term_store": "memory",
+            },
+        )
+
+    def test_readiness_rejects_storage_fallback(self):
+        with patch.object(
+            main.settings,
+            "database_url",
+            "postgresql://configured",
+        ), patch.object(
+            main.settings,
+            "memory_store_backend",
+            "redis",
+        ), patch.object(main, "chat_checkpointer", InMemorySaver()), patch.object(
+            main,
+            "langgraph_store_available",
+            False,
+        ):
+            response = self.client.get("/ready")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "not_ready")
+        self.assertEqual(
+            response.json()["checks"],
+            {
+                "chat_checkpointer": "fallback_to_memory",
+                "long_term_store": "fallback_to_memory",
+            },
+        )
+
+    def test_readiness_probes_configured_remote_stores(self):
+        with patch.object(
+            main.settings,
+            "database_url",
+            "postgresql://configured",
+        ), patch.object(
+            main.settings,
+            "memory_store_backend",
+            "redis",
+        ), patch.object(
+            main.settings,
+            "memory_store_url",
+            "redis://configured",
+        ), patch.object(main, "chat_checkpointer", object()), patch.object(
+            main,
+            "langgraph_store_available",
+            True,
+        ), patch.object(
+            main,
+            "_probe_postgres_connection",
+            return_value=True,
+        ) as postgres_probe, patch.object(
+            main,
+            "_probe_redis_connection",
+            return_value=True,
+        ) as redis_probe:
+            response = self.client.get("/ready")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["checks"],
+            {
+                "chat_checkpointer": "reachable",
+                "long_term_store": "reachable",
+            },
+        )
+        postgres_probe.assert_called_once_with("postgresql://configured")
+        redis_probe.assert_called_once_with("redis://configured")
+
+    def test_readiness_returns_503_when_remote_store_is_unreachable(self):
+        with patch.object(
+            main.settings,
+            "database_url",
+            "postgresql://secret-host",
+        ), patch.object(
+            main.settings,
+            "memory_store_backend",
+            "redis",
+        ), patch.object(
+            main.settings,
+            "memory_store_url",
+            "redis://secret-host",
+        ), patch.object(main, "chat_checkpointer", object()), patch.object(
+            main,
+            "langgraph_store_available",
+            True,
+        ), patch.object(
+            main,
+            "_probe_postgres_connection",
+            side_effect=TimeoutError("private connection detail"),
+        ), patch.object(
+            main,
+            "_probe_redis_connection",
+            side_effect=ConnectionError("private connection detail"),
+        ):
+            response = self.client.get("/ready")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["checks"],
+            {
+                "chat_checkpointer": "unavailable",
+                "long_term_store": "unavailable",
+            },
+        )
+        self.assertNotIn("secret-host", response.text)
+        self.assertNotIn("private connection detail", response.text)
+
+    def test_readiness_is_public_for_container_probes(self):
+        with patch.object(main, "configured_api_key", "probe-secret"), patch.object(
+            main.settings,
+            "database_url",
+            "",
+        ), patch.object(main.settings, "memory_store_backend", "memory"), patch.object(
+            main,
+            "langgraph_store_available",
+            True,
+        ):
+            response = self.client.get("/ready")
+
+        self.assertEqual(response.status_code, 200)
 
     def test_agent_health_returns_local_capabilities(self):
         response = self.client.get("/api/health/agent")
@@ -84,6 +273,25 @@ class PublicApiTests(unittest.TestCase):
             "search_providers_available",
             payload,
         )
+        self.assertEqual(
+            payload["rag_embedding"]["provider"],
+            "local-hash",
+        )
+        self.assertTrue(payload["rag_embedding"]["available"])
+
+    def test_agent_health_does_not_expose_embedding_api_key(self):
+        with patch.object(main.settings, "rag_embedding_provider", "openai"), patch.object(
+            main.settings,
+            "rag_embedding_api_key",
+            "",
+        ):
+            response = self.client.get("/api/health/agent")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["rag_embedding"]["available"])
+        self.assertIn("API Key", payload["rag_embedding"]["reason"])
+        self.assertNotIn("rag_embedding_api_key", str(payload))
 
     def test_public_config_does_not_expose_api_keys(self):
         response = self.client.get("/api/config/public")
@@ -163,6 +371,59 @@ class PublicApiTests(unittest.TestCase):
                 "thread_"
             )
         )
+
+    def test_chat_explicit_search_modes_select_expected_routes(self):
+        expected_flags = {
+            "direct": (False, False, False),
+            "web": (True, False, False),
+            "agent": (False, True, False),
+            # Deep Research runs through the agent executor.
+            "deep": (False, True, True),
+        }
+
+        for mode, flags in expected_flags.items():
+            with self.subTest(mode=mode):
+                with patch.object(
+                    main.chat_runtime,
+                    "ainvoke",
+                    new=AsyncMock(
+                        return_value={
+                            "final_report": f"{mode} 回答",
+                            "status": "completed",
+                        }
+                    ),
+                ) as invoke:
+                    response = self.client.post(
+                        "/api/chat",
+                        json={
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": f"测试 {mode}",
+                                }
+                            ],
+                            "stream": False,
+                            "search_mode": {
+                                "mode": mode,
+                            },
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 200)
+
+                search_mode = invoke.await_args.kwargs[
+                    "config"
+                ]["configurable"]["search_mode"]
+
+                self.assertEqual(search_mode["mode"], mode)
+                self.assertEqual(
+                    (
+                        search_mode["use_web"],
+                        search_mode["use_agent"],
+                        search_mode["use_deep"],
+                    ),
+                    flags,
+                )
 
     def test_chat_rejects_missing_user_message(self):
         response = self.client.post(
@@ -246,15 +507,30 @@ class PublicApiTests(unittest.TestCase):
             main.chat_runtime,
             "astream_runtime_events",
             new=fake_events,
-        ):
+        ), patch.object(
+            main.chat_runtime,
+            "aupdate_state",
+            new_callable=AsyncMock,
+        ) as update_state, patch(
+            "main._finalize_browser_sessions",
+            new_callable=AsyncMock,
+        ) as finalize_browser_sessions:
             response = self.client.post(
                 "/api/chat/sse",
                 json={
                     "messages": [
                         {
                             "role": "user",
+                            "content": "第一轮问题",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "第一轮回答",
+                        },
+                        {
+                            "role": "user",
                             "content": "测试 SSE",
-                        }
+                        },
                     ]
                 },
             )
@@ -293,6 +569,21 @@ class PublicApiTests(unittest.TestCase):
             completion_frame["data"]["content"],
             "SSE 回答",
         )
+        self.assertEqual(
+            update_state.await_args.kwargs["values"][
+                "conversation_history"
+            ],
+            [
+                {"role": "user", "content": "第一轮问题"},
+                {"role": "assistant", "content": "第一轮回答"},
+                {"role": "user", "content": "测试 SSE"},
+                {"role": "assistant", "content": "SSE 回答"},
+            ],
+        )
+        finalize_browser_sessions.assert_awaited_once_with(
+            response.headers["x-thread-id"],
+            preserve=False,
+        )
 
         self.assertTrue(
             any(
@@ -300,6 +591,58 @@ class PublicApiTests(unittest.TestCase):
                 for frame in frames
             )
         )
+
+    def test_chat_sse_streams_model_tokens_before_completion(self):
+        async def fake_events(*args, **kwargs):
+            yield RuntimeEvent(
+                event="on_chat_model_stream",
+                name="ChatOpenAI",
+                metadata={"langgraph_node": "direct_answer"},
+                data={"chunk": AIMessageChunk(content="首段")},
+            )
+            yield RuntimeEvent(
+                event="on_chat_model_stream",
+                name="ChatOpenAI",
+                metadata={"langgraph_node": "direct_answer"},
+                data={"chunk": AIMessageChunk(content="回答")},
+            )
+            yield RuntimeEvent(
+                event="on_chain_end",
+                name="finalize",
+                data={"output": {"final_report": "首段回答"}},
+            )
+
+        with patch.object(
+            main.chat_runtime,
+            "astream_runtime_events",
+            new=fake_events,
+        ), patch.object(
+            main.chat_runtime,
+            "aupdate_state",
+            new_callable=AsyncMock,
+        ), patch(
+            "main._finalize_browser_sessions",
+            new_callable=AsyncMock,
+        ):
+            response = self.client.post(
+                "/api/chat/sse",
+                json={"messages": [{"role": "user", "content": "测试流式回答"}]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        text_frames = [frame for frame in frames if frame.get("type") == "text"]
+        event_types = [frame.get("type") for frame in frames]
+
+        self.assertEqual(
+            [frame["data"]["content"] for frame in text_frames],
+            ["首段", "回答"],
+        )
+        self.assertLess(event_types.index("text"), event_types.index("completion"))
 
     def test_chat_sse_uses_error_event_on_runtime_failure(self):
         async def failing_events(*args, **kwargs):
@@ -315,7 +658,11 @@ class PublicApiTests(unittest.TestCase):
             main.chat_runtime,
             "astream_runtime_events",
             new=failing_events,
-        ):
+        ), patch.object(
+            main.chat_runtime,
+            "aupdate_state",
+            new_callable=AsyncMock,
+        ) as persist_failed:
             response = self.client.post(
                 "/api/chat/sse",
                 json={
@@ -349,6 +696,11 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(
             error_frame["data"]["message"],
             "测试流错误",
+        )
+        persist_failed.assert_awaited_once()
+        self.assertEqual(
+            persist_failed.await_args.kwargs["values"]["status"],
+            "failed",
         )
 
 
@@ -391,6 +743,64 @@ class PublicApiTests(unittest.TestCase):
         )
 
         task.cancel.assert_called_once()
+
+    def test_cancel_persists_cancelled_checkpoint(self):
+        task = MagicMock()
+        task.done.return_value = False
+        token = main.cancellation_manager.create_token_sync(
+            "thread-cancel-persist-001",
+        )
+        token.mark_running()
+
+        with patch.object(
+            main.chat_runtime,
+            "acancel",
+            new=AsyncMock(),
+        ) as persist_cancel:
+            main._active_chat_tasks["thread-cancel-persist-001"] = task
+            try:
+                response = self.client.post(
+                    "/api/chat/cancel/thread-cancel-persist-001",
+                )
+            finally:
+                main._active_chat_tasks.pop(
+                    "thread-cancel-persist-001",
+                    None,
+                )
+
+        self.assertEqual(response.status_code, 200)
+        persist_cancel.assert_awaited_once_with(
+            thread_id="thread-cancel-persist-001",
+        )
+
+    def test_cancel_marks_persisted_orphan_thread_cancelled(self):
+        with patch.object(
+            main.chat_runtime,
+            "ainspect_thread",
+            new=AsyncMock(
+                return_value={
+                    "status": "running",
+                    "is_complete": False,
+                    "is_cancelled": False,
+                }
+            ),
+        ) as inspect_thread, patch.object(
+            main.chat_runtime,
+            "acancel",
+            new=AsyncMock(),
+        ) as persist_cancel:
+            response = self.client.post(
+                "/api/chat/cancel/thread-orphan-running-001",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "cancelled")
+        inspect_thread.assert_awaited_once_with(
+            thread_id="thread-orphan-running-001",
+        )
+        persist_cancel.assert_awaited_once_with(
+            thread_id="thread-orphan-running-001",
+        )
 
 
     def test_cancel_chat_returns_not_found_for_finished_task(self):

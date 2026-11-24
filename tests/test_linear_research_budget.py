@@ -9,11 +9,13 @@ from agent.workflows.nodes import (
     deep_tree_search_node,
     deep_writer_node,
     evaluator_node,
+    revise_node,
 )
 from agent.workflows.research_tree import ResearchTree
 from agent.workflows.research_budget import (
     DEFAULT_DEEPSEARCH_MAX_SECONDS,
     DEFAULT_DEEPSEARCH_MAX_TOKENS,
+    add_budget_tokens,
     estimate_tokens,
     model_call_tokens,
     new_research_budget,
@@ -53,6 +55,26 @@ class LinearResearchBudgetTests(unittest.TestCase):
             usage_metadata={"total_tokens": 7},
         )
         self.assertEqual(model_call_tokens("x" * 400, response), 7)
+
+    def test_token_usage_is_accumulated_by_stage(self):
+        budget = add_budget_tokens(
+            {"tokens_used": 10},
+            7,
+            stage="planner",
+            now=1_000.0,
+        )
+        budget = add_budget_tokens(
+            budget,
+            13,
+            stage="writer",
+            now=1_001.0,
+        )
+
+        self.assertEqual(budget["tokens_used"], 30)
+        self.assertEqual(
+            budget["token_usage_by_stage"],
+            {"planner": 7, "writer": 13},
+        )
 
     def test_token_budget_stops_before_starting_the_next_query(self):
         calls = []
@@ -429,6 +451,181 @@ class LinearResearchBudgetTests(unittest.TestCase):
         self.assertEqual(result["writer_agent_result"]["status"], "skipped")
         self.assertEqual(result["writer_agent_result"]["tools_used"], [])
 
+    def test_writer_skips_model_when_prompt_would_exceed_remaining_budget(self):
+        class FakeWriter:
+            def invoke(self, messages, config=None):
+                raise AssertionError("oversized writer prompt must not be sent")
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=FakeWriter(),
+        ):
+            result = deep_writer_node(
+                {
+                    "input": "research topic",
+                    "route": "deep",
+                    "research_plan": ["research topic evidence"],
+                    "search_results": [{
+                        "query": "research topic evidence",
+                        "title": "Evidence",
+                        "url": "https://example.test/evidence",
+                        "snippet": "A supported finding.",
+                    }],
+                    "deepsearch_artifacts": {
+                        "research_budget": {
+                            "max_tokens": 500,
+                            "tokens_used": 499,
+                            "stop_reason": "",
+                        },
+                    },
+                },
+                config={"configurable": {"deepsearch_max_tokens": 500}},
+            )
+
+        budget = result["deepsearch_artifacts"]["research_budget"]
+        self.assertEqual(budget["stop_reason"], "token_budget_exceeded")
+        self.assertEqual(result["writer_agent_result"]["status"], "skipped")
+        self.assertIn("预算限制提前停止", result["final_report"])
+
+    def test_writer_reserves_tokens_for_evaluator(self):
+        class FakeWriter:
+            def invoke(self, messages, config=None):
+                raise AssertionError("writer must not consume the evaluator reserve")
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=FakeWriter(),
+        ):
+            result = deep_writer_node(
+                {
+                    "input": "research topic",
+                    "route": "deep",
+                    "research_plan": ["research topic evidence"],
+                    "search_results": [{
+                        "query": "research topic evidence",
+                        "title": "Evidence",
+                        "url": "https://example.test/evidence",
+                        "snippet": "A supported finding.",
+                    }],
+                    "deepsearch_artifacts": {
+                        "research_budget": {
+                            "max_tokens": 10000,
+                            "tokens_used": 9500,
+                            "max_seconds": 120,
+                            "elapsed_seconds": 20,
+                            "stop_reason": "",
+                        },
+                    },
+                },
+                config={"configurable": {
+                    "deepsearch_max_tokens": 10000,
+                    "deepsearch_max_seconds": 120,
+                }},
+            )
+
+        budget = result["deepsearch_artifacts"]["research_budget"]
+        self.assertEqual(budget["stop_reason"], "")
+        self.assertEqual(result["writer_agent_result"]["status"], "skipped")
+        self.assertEqual(
+            result["writer_agent_result"]["error"],
+            "evaluator_budget_reserved",
+        )
+
+    def test_writer_budget_leaves_room_for_evaluator_model_call(self):
+        writer_messages = []
+        evaluator_model = None
+
+        class FakeWriter:
+            def invoke(self, messages, config=None):
+                writer_messages.extend(messages)
+                return SimpleNamespace(
+                    content="# 研究结论\n\n基于证据的简短结论。[来源1]",
+                    usage_metadata={"total_tokens": 1200},
+                )
+
+            def bind(self, **kwargs):
+                return self
+
+        class FakeEvaluator:
+            output_limit = None
+
+            def bind(self, **kwargs):
+                self.output_limit = kwargs["max_tokens"]
+                return self
+
+            def invoke(self, messages, config=None):
+                return SimpleNamespace(
+                    content=(
+                        '{"verdict":"pass","evaluation":"证据充分",'
+                        '"eval_dimensions":{"accuracy":0.9,"completeness":0.8},'
+                        '"missing_topics":[]}'
+                    ),
+                    usage_metadata={"total_tokens": 300},
+                )
+
+        evaluator_model = FakeEvaluator()
+
+        def model_for_task(task, **kwargs):
+            return evaluator_model if task == "evaluation" else FakeWriter()
+
+        evidence = [
+            {
+                "query": f"topic {index}",
+                "title": f"Evidence {index}",
+                "url": f"https://example.test/{index}",
+                "snippet": "支持材料。" * 1000,
+            }
+            for index in range(12)
+        ]
+        state = {
+            "input": "Compare the evidence and state the limitations.",
+            "route": "deep",
+            "deepsearch_mode": "tree",
+            "research_plan": ["official docs", "limitations"],
+            "search_results": evidence,
+            "sources": evidence,
+            "deepsearch_artifacts": {
+                "tree_summary": "分支摘要。" * 2000,
+                "research_budget": {
+                    "max_tokens": 10000,
+                    "tokens_used": 3000,
+                    "max_seconds": 120,
+                    "elapsed_seconds": 20,
+                    "stop_reason": "",
+                },
+            },
+        }
+
+        with (
+            patch("agent.workflows.nodes.ModelFactory.for_task", side_effect=model_for_task),
+            patch.object(settings, "deepsearch_use_gap_analysis", False),
+        ):
+            written = deep_writer_node(
+                state,
+                config={"configurable": {
+                    "deepsearch_max_tokens": 10000,
+                    "deepsearch_max_seconds": 120,
+                }},
+            )
+            evaluated = evaluator_node(
+                {**state, **written},
+                config={"configurable": {
+                    "deepsearch_max_tokens": 10000,
+                    "deepsearch_max_seconds": 120,
+                }},
+            )
+
+        self.assertLess(len(str(writer_messages)), 12000)
+        self.assertEqual(written["writer_agent_result"]["status"], "completed")
+        self.assertEqual(evaluated["evaluator_agent_result"]["status"], "completed")
+        self.assertNotEqual(evaluated["verdict"], "budget_exhausted")
+        self.assertIsNotNone(evaluator_model.output_limit)
+        self.assertFalse(evaluated["quality_summary"].get("evaluation_skipped", False))
+        self.assertLessEqual(
+            evaluated["deepsearch_artifacts"]["research_budget"]["tokens_used"],
+            10000,
+        )
+
     def test_evaluator_skips_model_when_research_budget_is_exhausted(self):
         state = {
             "input": "research topic",
@@ -458,6 +655,177 @@ class LinearResearchBudgetTests(unittest.TestCase):
         self.assertEqual(
             result["deepsearch_artifacts"]["research_budget"]["tokens_used"],
             10,
+        )
+
+    def test_evaluator_caps_completion_tokens_to_remaining_budget(self):
+        class FakeModel:
+            output_limit = None
+
+            def bind(self, **kwargs):
+                self.output_limit = kwargs["max_tokens"]
+                return self
+
+            def invoke(self, messages, config=None):
+                return SimpleNamespace(
+                    content='{"verdict":"pass","evaluation":"ok","eval_dimensions":{},"missing_topics":[]}',
+                    usage_metadata={"total_tokens": 200},
+                )
+
+        model = FakeModel()
+        state = {
+            "input": "research topic",
+            "route": "deep",
+            "deepsearch_mode": "tree",
+            "draft_report": "A short evidence-based report. [来源1]",
+            "search_results": [{
+                "title": "Evidence",
+                "url": "https://example.test/evidence",
+                "snippet": "A short supporting excerpt.",
+            }],
+            "sources": [{
+                "title": "Evidence",
+                "url": "https://example.test/evidence",
+            }],
+        }
+        with patch("agent.workflows.nodes.ModelFactory.for_task", return_value=model), patch.object(
+            settings, "deepsearch_use_gap_analysis", False
+        ):
+            result = evaluator_node(
+                state,
+                config={"configurable": {"deepsearch_max_tokens": 10000}},
+            )
+
+        self.assertIsNotNone(model.output_limit)
+        self.assertGreater(model.output_limit, 0)
+        self.assertEqual(model.output_limit, 1536)
+        self.assertLessEqual(
+            result["deepsearch_artifacts"]["research_budget"]["tokens_used"],
+            10000,
+        )
+
+    def test_evaluator_skips_when_prompt_leaves_no_completion_budget(self):
+        class FakeModel:
+            def invoke(self, messages, config=None):
+                raise AssertionError("evaluation must not exceed the remaining budget")
+
+        with patch("agent.workflows.nodes.ModelFactory.for_task", return_value=FakeModel()):
+            result = evaluator_node(
+                {
+                    "input": "research topic",
+                    "route": "deep",
+                    "deepsearch_mode": "tree",
+                    "draft_report": "A report.",
+                    "search_results": [],
+                },
+                config={"configurable": {"deepsearch_max_tokens": 100}},
+            )
+
+        self.assertEqual(result["verdict"], "budget_exhausted")
+        self.assertTrue(result["quality_summary"]["evaluation_skipped"])
+        self.assertEqual(
+            result["deepsearch_artifacts"]["research_budget"]["stop_reason"],
+            "token_budget_exceeded",
+        )
+
+    def test_revision_is_output_bounded_and_preserves_re_evaluation_budget(self):
+        class FakeModel:
+            output_limit = None
+
+            def bind(self, **kwargs):
+                self.output_limit = kwargs["max_tokens"]
+                return self
+
+            def invoke(self, messages, config=None):
+                return SimpleNamespace(
+                    content="修订后的报告 [来源1]",
+                    usage_metadata={"total_tokens": 300},
+                )
+
+        model = FakeModel()
+        state = {
+            "input": "研究主题",
+            "route": "deep",
+            "deepsearch_mode": "tree",
+            "draft_report": "原始报告 [来源1]",
+            "search_results": [{
+                "title": "来源",
+                "url": "https://example.test/source",
+                "snippet": "证据内容",
+            }],
+            "missing_topics": ["尚缺的内容"],
+            "revision_count": 0,
+            "deepsearch_artifacts": {
+                "research_budget": {
+                    "max_tokens": 10000,
+                    "tokens_used": 1000,
+                    "max_seconds": 120,
+                    "elapsed_seconds": 1,
+                    "stop_reason": "",
+                },
+            },
+        }
+
+        with patch("agent.workflows.nodes.ModelFactory.for_task", return_value=model):
+            result = revise_node(
+                state,
+                config={"configurable": {
+                    "deepsearch_max_tokens": 10000,
+                    "deepsearch_max_seconds": 120,
+                }},
+            )
+
+        self.assertGreater(model.output_limit, 0)
+        self.assertLessEqual(model.output_limit, 1024)
+        self.assertEqual(result["revision_count"], 1)
+        self.assertTrue(result["draft_report"].startswith("修订后的报告 [来源1]"))
+        self.assertEqual(
+            result["deepsearch_artifacts"]["research_budget"]["tokens_used"],
+            1300,
+        )
+
+    def test_revision_skips_model_when_it_would_consume_re_evaluation_reserve(self):
+        model = SimpleNamespace(
+            invoke=lambda *_args, **_kwargs: self.fail(
+                "revision must not consume the reserved re-evaluation budget"
+            )
+        )
+        state = {
+            "input": "研究主题",
+            "route": "deep",
+            "deepsearch_mode": "tree",
+            "draft_report": "原始报告 [来源1]",
+            "search_results": [{
+                "title": "来源",
+                "url": "https://example.test/source",
+                "snippet": "证据内容",
+            }],
+            "missing_topics": ["尚缺的内容"],
+            "revision_count": 0,
+            "deepsearch_artifacts": {
+                "research_budget": {
+                    "max_tokens": 10000,
+                    "tokens_used": 9900,
+                    "max_seconds": 120,
+                    "elapsed_seconds": 1,
+                    "stop_reason": "",
+                },
+            },
+        }
+
+        with patch("agent.workflows.nodes.ModelFactory.for_task", return_value=model):
+            result = revise_node(
+                state,
+                config={"configurable": {
+                    "deepsearch_max_tokens": 10000,
+                    "deepsearch_max_seconds": 120,
+                }},
+            )
+
+        self.assertEqual(result["revision_agent_result"]["status"], "skipped")
+        self.assertEqual(result["revision_count"], 0)
+        self.assertEqual(
+            result["deepsearch_artifacts"]["research_budget"]["stop_reason"],
+            "token_budget_exceeded",
         )
 
     def test_budget_exhaustion_prevents_another_research_epoch(self):

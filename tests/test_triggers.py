@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from common.triggers import (
@@ -128,6 +129,56 @@ class TriggerManagerTests(unittest.IsolatedAsyncioTestCase):
             trigger.status,
             TriggerStatus.ACTIVE,
         )
+
+    def test_scheduled_time_uses_configured_timezone(self):
+        now = datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc)
+
+        next_run = self.manager._next_run(
+            "0 9 * * *",
+            now,
+            "Asia/Shanghai",
+        )
+
+        self.assertEqual(
+            next_run,
+            datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        )
+
+    def test_scheduled_time_skips_nonexistent_dst_minute(self):
+        now = datetime(2026, 3, 8, 5, 0, tzinfo=timezone.utc)
+
+        next_run = self.manager._next_run(
+            "30 2 * * *",
+            now,
+            "America/New_York",
+        )
+
+        self.assertEqual(
+            next_run,
+            datetime(2026, 3, 9, 6, 30, tzinfo=timezone.utc),
+        )
+
+    def test_scheduled_time_handles_repeated_dst_minute(self):
+        now = datetime(2026, 11, 1, 5, 45, tzinfo=timezone.utc)
+
+        next_run = self.manager._next_run(
+            "30 1 * * *",
+            now,
+            "America/New_York",
+        )
+
+        self.assertEqual(
+            next_run,
+            datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc),
+        )
+
+    def test_scheduled_time_rejects_unknown_timezone(self):
+        with self.assertRaisesRegex(ValueError, "无效时区"):
+            self.manager._next_run(
+                "0 9 * * *",
+                datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "Invalid/Timezone",
+            )
 
 
 if __name__ == "__main__":

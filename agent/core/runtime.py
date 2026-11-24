@@ -154,6 +154,7 @@ class AgentRuntime:
             self,
             *,
             checkpointer: Any = None,
+            store: Any = None,
             profile: AgentProfile | None = None,
             registry: ToolRegistry | None = None,
     ):
@@ -174,11 +175,13 @@ class AgentRuntime:
             )
 
         self._checkpointer = checkpointer
+        self._store = store
         self._profile = profile
         self._registry = registry
 
         self.graph = create_research_graph(
             checkpointer=checkpointer,
+            store=store,
         )
 
 
@@ -313,7 +316,26 @@ class AgentRuntime:
                 [],
             ) or []
 
-        return list(interrupts)
+        if interrupts:
+            return list(interrupts) if isinstance(interrupts, (list, tuple, set)) else [interrupts]
+
+        tasks = (
+            snapshot.get("tasks", [])
+            if isinstance(snapshot, Mapping)
+            else getattr(snapshot, "tasks", [])
+        ) or []
+        result: list[Any] = []
+        for task in tasks:
+            task_interrupts = (
+                task.get("interrupts", [])
+                if isinstance(task, Mapping)
+                else getattr(task, "interrupts", [])
+            ) or []
+            if isinstance(task_interrupts, (list, tuple, set)):
+                result.extend(task_interrupts)
+            else:
+                result.append(task_interrupts)
+        return result
 
 
 
@@ -321,6 +343,7 @@ class AgentRuntime:
             self,
             user_input: str,
             messages: list[Any] | None,
+            conversation_history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(user_input,str):
             raise ValueError(
@@ -332,10 +355,18 @@ class AgentRuntime:
                 "user_input 不能为空。"
             )
 
-        return {
+        payload = {
             "input": user_input,
             "messages": list(messages or []),
         }
+
+        if conversation_history is not None:
+            payload["conversation_history"] = [
+                dict(message)
+                for message in conversation_history
+            ]
+
+        return payload
 
     @staticmethod
     def _attach_config_metadata(
@@ -354,6 +385,7 @@ class AgentRuntime:
             "thread_id",
             "user_id",
             "agent_id",
+            "images",
         ):
             value = configurable.get(key)
 
@@ -369,6 +401,7 @@ class AgentRuntime:
             user_input: str,
             *,
             messages: list[Any] | None = None,
+            conversation_history: list[dict[str, str]] | None = None,
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
     ) -> dict[str,Any]:
@@ -389,6 +422,7 @@ class AgentRuntime:
         payload = self._build_payload(
             user_input,
             messages,
+            conversation_history,
         )
 
         runtime_config = self._build_config(
@@ -412,6 +446,7 @@ class AgentRuntime:
             user_input: str,
             *,
             messages: list[Any] | None = None,
+            conversation_history: list[dict[str, str]] | None = None,
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
     ) -> dict[str,Any]:
@@ -422,6 +457,7 @@ class AgentRuntime:
         payload = self._build_payload(
             user_input,
             messages,
+            conversation_history,
         )
 
         runtime_config = self._build_config(
@@ -657,6 +693,36 @@ class AgentRuntime:
         )
 
 
+    async def aupdate_state(
+            self,
+            *,
+            thread_id: str,
+            values: Mapping[str, Any],
+            config: Mapping[str, Any] | None = None,
+            as_node: str | None = None,
+    ) -> Any:
+        """异步更新指定线程的检查点状态。"""
+
+        self._require_checkpointer("aupdate_state")
+
+        runtime_config = self._build_config(
+            config=config,
+            thread_id=thread_id,
+        )
+
+        update_options = (
+            {"as_node": as_node}
+            if as_node is not None
+            else {}
+        )
+
+        return await self.graph.aupdate_state(
+            runtime_config,
+            dict(values),
+            **update_options,
+        )
+
+
     async def ainspect_thread(
             self,
             *,
@@ -758,6 +824,7 @@ class AgentRuntime:
             user_input: str,
             *,
             messages: list[Any] | None = None,
+            conversation_history: list[dict[str, str]] | None = None,
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
             stream_mode: Any = "values",
@@ -769,6 +836,7 @@ class AgentRuntime:
         payload = self._build_payload(
             user_input,
             messages,
+            conversation_history,
         )
 
         runtime_config = self._build_config(
@@ -793,6 +861,7 @@ class AgentRuntime:
             user_input: str,
             *,
             messages: list[Any] | None = None,
+            conversation_history: list[dict[str, str]] | None = None,
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
             stream_mode: Any = "values",
@@ -804,6 +873,7 @@ class AgentRuntime:
         payload = self._build_payload(
             user_input,
             messages,
+            conversation_history,
         )
 
         runtime_config = self._build_config(
@@ -929,6 +999,7 @@ class AgentRuntime:
             user_input: str,
             *,
             messages: list[Any] | None = None,
+            conversation_history: list[dict[str, str]] | None = None,
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
             version: str = "v2",
@@ -944,6 +1015,7 @@ class AgentRuntime:
         payload = self._build_payload(
             user_input,
             messages,
+            conversation_history,
         )
 
         runtime_config = self._build_config(
@@ -1064,6 +1136,7 @@ class AgentRuntime:
             user_input: str,
             *,
             messages: list[Any] | None = None,
+            conversation_history: list[dict[str, str]] | None = None,
             thread_id: str | None = None,
             config: Mapping[str, Any] | None = None,
             version: str = "v2",
@@ -1081,6 +1154,7 @@ class AgentRuntime:
         async for raw_event in self.astream_events(
             user_input,
             messages=messages,
+            conversation_history=conversation_history,
             thread_id=thread_id,
             config=config,
             version=version,

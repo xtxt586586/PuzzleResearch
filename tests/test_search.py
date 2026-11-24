@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from agent.workflows.nodes import search_node
 from common.config import settings
+from tools.research.models import FetchedPage
 from tools.search.manager import SearchManager
 
 
@@ -75,6 +76,95 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(provider.calls, [("deep query", 2)])
         self.assertEqual(len(result["search_results"]), 1)
 
+    def test_deep_search_uses_configured_multi_provider_strategy(self):
+        first = FakeProvider(
+            "first",
+            results=[
+                {
+                    "title": "First",
+                    "url": "https://first.example.com",
+                    "snippet": "first result",
+                    "content": "first content",
+                    "provider": "first",
+                    "score": 0.5,
+                }
+            ],
+        )
+        second = FakeProvider(
+            "second",
+            results=[
+                {
+                    "title": "Second",
+                    "url": "https://second.example.com",
+                    "snippet": "second result",
+                    "content": "second content",
+                    "provider": "second",
+                    "score": 0.9,
+                }
+            ],
+        )
+
+        with patch.object(settings, "search_engines", "first,second"), patch.object(
+            settings, "search_strategy", "parallel", create=True
+        ), patch.object(
+            settings, "search_reliability_max_retries", 0, create=True
+        ), patch(
+            "agent.workflows.nodes.SearchManager",
+            return_value=SearchManager({"first": first, "second": second}),
+        ):
+            result = search_node({"query": "deep query", "search_mode": "deep"})
+
+        self.assertEqual(first.calls, [("deep query", 5)])
+        self.assertEqual(second.calls, [("deep query", 5)])
+        self.assertEqual(
+            [item["provider"] for item in result["search_results"]],
+            ["second", "first"],
+        )
+
+    def test_deep_search_attaches_fetched_pages_when_enabled(self):
+        provider = FakeProvider(
+            "fake",
+            results=[
+                {
+                    "title": "Result",
+                    "url": "https://example.com/source",
+                    "snippet": "snippet",
+                    "content": "summary",
+                    "provider": "fake",
+                }
+            ],
+        )
+        fetched_page = FetchedPage(
+            url="https://example.com/source",
+            raw_url="https://example.com/source",
+            method="direct_http",
+            text="full source body",
+            http_status=200,
+        )
+
+        with patch.object(settings, "search_engines", "fake"), patch.object(
+            settings, "deepsearch_enable_research_fetcher", True
+        ), patch(
+            "agent.workflows.nodes.SearchManager",
+            return_value=SearchManager({"fake": provider}),
+        ), patch("agent.workflows.nodes.ContentFetcher") as fetcher_class:
+            fetcher_class.return_value.fetch_many.return_value = [fetched_page]
+            result = search_node(
+                {"query": "deep query", "search_mode": "deep"}
+            )
+
+        self.assertEqual(
+            result["fetched_pages"][0]["method"],
+            "direct_http",
+        )
+        self.assertEqual(
+            result["search_results"][0]["fetched_content"],
+            "full source body",
+        )
+        fetcher_class.return_value.fetch_many.assert_called_once_with(
+            ["https://example.com/source"]
+        )
+
     def test_manager_reuses_cached_result(self):
         provider = FakeProvider(
             "fake",
@@ -113,6 +203,35 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(stats["hits"], 1)
         self.assertEqual(stats["misses"], 1)
         self.assertEqual(stats["hit_rate"], 0.5)
+
+    def test_provider_call_stats_use_api_field_names(self):
+        provider = FakeProvider(
+            "fake",
+            results=[
+                {
+                    "title": "Result",
+                    "url": "https://example.com",
+                    "snippet": "snippet",
+                    "content": "content",
+                    "provider": "fake",
+                }
+            ],
+        )
+        manager = SearchManager({"fake": provider})
+
+        with patch.object(settings, "search_engines", "fake"):
+            manager.search("stats query")
+
+        self.assertEqual(
+            manager.provider_call_stats()["fake"],
+            {
+                "calls": 1,
+                "successes": 1,
+                "failures": 0,
+                "empty_results": 0,
+                "last_error": "",
+            },
+        )
 
     def test_clear_cache_forces_provider_call(self):
         provider = FakeProvider(

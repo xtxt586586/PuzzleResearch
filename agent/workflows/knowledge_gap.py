@@ -66,6 +66,82 @@ def _clean_topics(
     return result
 
 
+def normalize_knowledge_gap_analysis(
+    value: Any,
+    *,
+    coverage_threshold: float = 0.8,
+) -> dict[str, Any] | None:
+    """Validate model-produced semantic coverage and targeted query data."""
+    if not isinstance(value, dict):
+        return None
+
+    def score(raw: Any, default: float) -> float:
+        try:
+            return max(0.0, min(float(raw), 1.0))
+        except (TypeError, ValueError):
+            return default
+
+    gaps: list[dict[str, str]] = []
+    seen_aspects: set[str] = set()
+    raw_gaps = value.get("gaps", [])
+    if isinstance(raw_gaps, list):
+        for item in raw_gaps:
+            if isinstance(item, str):
+                raw_gap = {"aspect": item}
+            elif isinstance(item, dict):
+                raw_gap = item
+            else:
+                continue
+
+            aspect = " ".join(
+                str(raw_gap.get("aspect", "") or "").split()
+            ).strip()
+            key = aspect.casefold()
+            if not aspect or key in seen_aspects:
+                continue
+            seen_aspects.add(key)
+
+            importance = str(
+                raw_gap.get("importance", "medium") or "medium"
+            ).strip().lower()
+            if importance not in {"high", "medium", "low"}:
+                importance = "medium"
+            gaps.append({
+                "aspect": aspect,
+                "importance": importance,
+                "reason": " ".join(
+                    str(raw_gap.get("reason", "") or "").split()
+                ).strip(),
+            })
+
+    suggested_queries = _clean_topics(
+        value.get("suggested_queries", [])
+        if isinstance(value.get("suggested_queries", []), list)
+        else []
+    )[:10]
+    covered_aspects = _clean_topics(
+        value.get("covered_aspects", [])
+        if isinstance(value.get("covered_aspects", []), list)
+        else []
+    )[:20]
+    coverage = score(value.get("overall_coverage"), 0.5)
+    confidence = score(value.get("confidence"), 0.5)
+    threshold = score(coverage_threshold, 0.8)
+    sufficient = coverage >= threshold and not any(
+        gap["importance"] == "high" for gap in gaps
+    )
+
+    return {
+        "overall_coverage": coverage,
+        "confidence": confidence,
+        "gaps": gaps,
+        "suggested_queries": suggested_queries,
+        "covered_aspects": covered_aspects,
+        "analysis": str(value.get("analysis", "") or "").strip(),
+        "is_sufficient": sufficient,
+    }
+
+
 def _unique_sources(
     sources: Iterable[Any],
 ) -> list[dict[str, Any]]:

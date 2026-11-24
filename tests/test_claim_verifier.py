@@ -9,6 +9,19 @@ from common.config import settings
 
 
 class ClaimVerifierTests(unittest.TestCase):
+    def test_extract_claims_skips_headings_and_reference_lists(self):
+        report = """# Milvus 2026 研究报告
+正文研究表明，2024年企业的部署成本增长了20%，需要关注长期运维。
+## 参考来源
+[来源 1] 2024 年增长研究：https://example.com/2024
+## 进一步研究
+数据显示，2025年部署成本下降了10%，需要继续核对证据。
+"""
+        claims = ClaimVerifier().extract_claims(report)
+        self.assertEqual(len(claims), 2)
+        self.assertTrue(all("https://" not in claim for claim in claims))
+        self.assertTrue(all(not claim.startswith("#") for claim in claims))
+
     def test_unsupported_claim_is_reported(self):
         checks = ClaimVerifier().verify_report(
             "2024年该公司营收增长了20%，并在海外市场创下历史新高。",

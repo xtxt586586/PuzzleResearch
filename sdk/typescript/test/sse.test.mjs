@@ -3,11 +3,11 @@ import { PuzzleResearchClient } from "../dist/index.js"
 
 const responseBody = [
   "event: completion",
-  "id: event-001",
-  'data: {"text":"hello"}',
+  "id: 7",
+  'data: {"type":"completion","data":{"text":"hello"}}',
   "",
   "event: tool_result",
-  'data: {"tool":"echo","result":"ok"}',
+  'data: {"type":"tool_result","data":{"result":"ok"}}',
   "",
 ].join("\n")
 
@@ -31,15 +31,19 @@ for await (const event of client.chatSse({
 }
 
 assert.equal(events.length, 2)
-assert.equal(events[0].event, "completion")
-assert.equal(events[0].id, "event-001")
-assert.deepEqual(events[0].value, {
-  text: "hello",
+
+assert.deepEqual(events[0], {
+  type: "completion",
+  data: {
+    text: "hello",
+  },
 })
-assert.equal(events[1].event, "tool_result")
-assert.deepEqual(events[1].value, {
-  tool: "echo",
-  result: "ok",
+
+assert.deepEqual(events[1], {
+  type: "tool_result",
+  data: {
+    result: "ok",
+  },
 })
 
 console.log("sse.test.mjs passed")

@@ -138,15 +138,32 @@ class SupportMemoryStore:
 
     @staticmethod
     def _tokens(value: str) -> set[str]:
-        return {
-            token.casefold()
-            for token in re.findall(
-                r"\w+",
-                value,
-                flags=re.UNICODE,
+        tokens: set[str] = set()
+        parts = re.findall(
+            r"[A-Za-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]+",
+            value,
+            flags=re.UNICODE,
+        )
+
+        for part in parts:
+            normalized = part.casefold()
+            if not re.fullmatch(
+                r"[\u3400-\u4dbf\u4e00-\u9fff]+",
+                part,
+            ):
+                tokens.add(normalized)
+                continue
+
+            if len(part) == 1:
+                tokens.add(normalized)
+                continue
+
+            tokens.update(
+                part[index:index + 2]
+                for index in range(len(part) - 1)
             )
-            if token.strip()
-        }
+
+        return tokens
 
     def search(
         self,

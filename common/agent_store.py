@@ -9,7 +9,7 @@ from datetime import datetime,timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel,ConfigDict,Field,field_validator
+from pydantic import BaseModel,ConfigDict,Field,StrictBool,field_validator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +45,7 @@ class AgentRecord(BaseModel):
     enabled_tools: dict[str,bool] = Field(
         default_factory=dict
     )
-    mcp_servers: dict[str,Any] | None = None
+    mcp_servers: dict[str,StrictBool] | None = None
     metadata: dict[str,Any] = Field(
         default_factory=dict
     )

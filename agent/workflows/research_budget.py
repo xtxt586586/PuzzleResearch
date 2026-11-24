@@ -174,6 +174,7 @@ def add_budget_tokens(
     budget: Mapping[str, Any],
     token_count: int,
     *,
+    stage: str | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     result = dict(budget)
@@ -181,7 +182,13 @@ def add_budget_tokens(
         current = max(int(result.get("tokens_used", 0)), 0)
     except (TypeError, ValueError):
         current = 0
-    result["tokens_used"] = current + max(int(token_count or 0), 0)
+    counted = max(int(token_count or 0), 0)
+    result["tokens_used"] = current + counted
+    if stage:
+        stages = result.get("token_usage_by_stage")
+        stages = dict(stages) if isinstance(stages, Mapping) else {}
+        stages[stage] = max(int(stages.get(stage, 0) or 0), 0) + counted
+        result["token_usage_by_stage"] = stages
     return refresh_research_budget(result, now=now)
 
 

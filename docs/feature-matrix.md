@@ -1,187 +1,59 @@
-```markdown
-# PuzzleResearch 功能对照表
+# PuzzleResearch 功能与验收矩阵
 
 状态说明：
 
-- [ ] 未开始
-- [~] 开发中
-- [x] 已完成
-- [!] 需要进一步验证
+- **已实现**：仓库内有对应实现，并有自动化测试覆盖主要行为。
+- **待集成验收**：代码和模拟测试已具备，但仍依赖真实服务、凭据、运行环境或人工体验验收。
+- **未对齐**：与固定 Weaver 参考版本仍需进一步做契约、行为或视觉逐项对照。
 
----
+## Agent 与研究工作流
 
-## 一、基础工程
+| 能力 | 状态 | 实现范围 |
+|---|---|---|
+| LangGraph AgentState、路由与条件工作流 | 已实现 | direct、web、agent、deep、clarify 路径及错误降级 |
+| Agent Profile 与工具策略 | 已实现 | 工具白名单/阻止、策略映射、调用限制、结果驱动重新规划 |
+| 工具审批、恢复和取消 | 已实现 | checkpoint 中断、恢复请求、运行状态和取消事件 |
+| 线性与树状 Deep Research | 已实现 | 查询规划、并发分支、预算控制、续轮和节点事件 |
+| 研究证据与质量回路 | 已实现 | 来源整理、证据段落、知识缺口、Claim 验证、评估和修订 |
+| 上下文压缩、记忆和提示管理 | 已实现 | 会话摘要、短期/长期记忆适配和集中提示管理 |
 
-- [x] Python 3.11 虚拟环境
-- [x] PyCharm 解释器配置
-- [x] Git 仓库
-- [x] 项目 README
-- [x] 环境变量管理
-- [ ] 日志系统
-- [x] 配置系统
-- [ ] Docker 基础环境
+## 工具与服务
 
-## 二、核心 Agent 架构
+| 能力 | 状态 | 实现范围 |
+|---|---|---|
+| 搜索与网页读取 | 已实现 | 多 Provider、fallback、缓存、feed/学术搜索、抓取和来源登记 |
+| Python、规划、任务清单与人工确认 | 已实现 | 参数校验、执行限制、任务状态和人工交互 |
+| RAG 与文档处理 | 待集成验收 | 文档上传/解析、向量化和检索；存储与 embedding 依赖配置 |
+| 浏览器、电脑操作与截图 | 待集成验收 | 会话工具、流式动作和截图；依赖浏览器/桌面运行环境 |
+| MCP 客户端与工具发现 | 待集成验收 | 配置、诊断、工具刷新和调用；需要真实 MCP 服务做联调 |
+| 文档、表格、演示文稿、图像和工作区工具 | 已实现 | 生成/读写接口和对应 SDK/API；仍需按目标 OS 验收外部应用兼容性 |
 
-- [x] AgentState
-- [x] 消息 reducer
-- [x] LangGraph StateGraph
-- [x] 路由节点
-- [x] 条件边
-- [x] 普通回答节点
-- [x] Agent 节点（工具规划、白名单、调用限制、Python 执行和审批恢复）
-- [x] 澄清节点
-- [x] Planner 节点
-- [x] Writer 节点
-- [x] Evaluator 节点
-- [x] Reviser 节点
-- [ ] Coordinator 节点
+## 产品与接口
 
-## 三、智能路由
+| 能力 | 状态 | 实现范围 |
+|---|---|---|
+| FastAPI API、OpenAPI、SSE | 已实现 | 聊天/研究流、运行事件、取消、会话和服务接口 |
+| 会话、版本、证据、分享与协作 | 已实现 | 所有权校验、状态恢复、评论和版本接口 |
+| Web 工作台 | 待集成验收 | 聊天、会话导航、研究活动、设置、工作区与扩展面板 |
+| Python 与 TypeScript SDK | 已实现 | API、SSE、会话、工具、研究和服务接口测试 |
+| ASR/TTS、触发器与导出 | 待集成验收 | API/前端集成已实现；需供应商凭据、Webhook 目标和真实媒体验收 |
+| PostgreSQL/Redis 与 Docker | 待集成验收 | Compose 含后端、PostgreSQL、Redis；需 Docker 环境做启动/恢复验收 |
 
-- [x] direct 路由
-- [x] agent 路由（工具规划、执行和审批中断）
-- [x] web 路由
-- [x] deep 路由
-- [x] clarify 路由
-- [x] 路由置信度
-- [ ] 用户显式模式覆盖
-- [x] 路由异常降级
+## 自动化质量门
 
-## 四、搜索系统
+- Python：`python -m unittest discover -s tests -v`，Windows 环境 1024 项运行、1 项跳过；修复 Linux 兼容问题后，隔离容器中 1024 项通过。
+- Web：`npm test`，Next.js production build、TypeScript 检查和 8 组 Node 测试通过。
+- TypeScript SDK：`npm test`，TypeScript 构建和 18 组脚本测试通过。
+- Python SDK：安装构建及 `test_sdk*.py` 回归测试，19 项通过。
+- 真实冒烟：本机 API/Web 健康检查通过；三次真实研究请求共记录 4 次模型调用，收到 SSE 报告、结束事件及带 URL 的来源。报告内容与引用支持关系未逐条核对。
+- Docker 集成：原 Compose 配置叠加隔离覆盖后，后端、PostgreSQL 和 Redis 健康检查通过，检查点和 Redis 记录在后端重启后可读回。测试使用临时文件系统及测试密码；原数据卷的持久化未验证。当前 `.env` 未提供 `POSTGRES_PASSWORD`。
+- 研究树检查点、分支结果恢复、失败分支的部分证据与统计有专门回归测试。
 
-- [x] Tavily Provider
-- [x] DuckDuckGo Provider
-- [ ] Brave Provider
-- [ ] Serper Provider
-- [x] 多 Provider 搜索
-- [x] Provider fallback
-- [ ] 搜索缓存
-- [x] URL 去重
-- [x] 搜索结果标准化
-- [ ] Provider 统计
+## 完成判定与剩余验收
 
-## 五、Deep Research
+目前可判定主要功能代码路径和自动化质量门已建立，但不宣称与 Weaver 1:1 完成。项目完成前还需：
 
-- [x] 查询生成
-- [x] 研究计划
-- [x] 多轮线性研究
-- [ ] 树状研究
-- [x] 分支并行
-- [ ] 搜索结果摘要
-- [ ] 网页正文抓取
-- [ ] 证据段落提取
-- [ ] 知识缺口检测
-- [x] 后续查询生成
-- [x] 来源整理
-- [x] 报告生成
-- [x] 引用附加
-- [x] 研究预算
-- [ ] 研究取消
-
-## 六、Agent 工具系统
-
-- [x] Tool Registry
-- [x] 动态工具装配
-- [x] Agent Profile
-- [x] 工具白名单
-- [ ] 工具黑名单
-- [ ] 工具去重
-- [ ] 工具事件包装
-- [ ] 工具选择器
-- [ ] 工具重试
-- [x] 工具调用限制
-- [x] 多轮工具调用
-- [x] 工具结果驱动重新规划
-- [ ] 上下文清理
-- [ ] Todo List
-- [x] 工具人工审批
-
-## 七、代码和浏览器
-
-- [x] Python 代码执行
-- [ ] Docker 沙箱
-- [ ] E2B 沙箱适配
-- [ ] Playwright 浏览器
-- [ ] 浏览器导航
-- [ ] 浏览器点击
-- [ ] 浏览器输入
-- [ ] 页面内容提取
-- [ ] 浏览器截图
-- [ ] WebSocket 浏览器画面
-- [ ] 桌面自动化
-
-## 八、RAG 和记忆
-
-- [ ] 文档上传
-- [ ] PDF 解析
-- [ ] DOCX 解析
-- [ ] 文本切分
-- [ ] 本地 Embedding
-- [ ] ChromaDB
-- [ ] 向量检索
-- [ ] LangGraph Store
-- [ ] 用户长期记忆
-- [ ] Mem0 适配
-- [ ] 本地记忆降级
-
-## 九、质量控制
-
-- [x] Evaluator
-- [ ] coverage 评估
-- [ ] accuracy 评估
-- [ ] freshness 评估
-- [ ] coherence 评估
-- [ ] QualityAssessor
-- [ ] ClaimVerifier
-- [ ] citation gate
-- [x] 缺失主题检测
-- [x] 报告修订
-- [x] 最大修订次数
-
-## 十、会话和人工介入
-
-- [x] InMemorySaver（开发/测试）
-- [ ] PostgreSQL Checkpointer
-- [ ] Redis Store
-- [ ] 计划审核
-- [ ] 来源审核
-- [ ] 草稿审核
-- [ ] 最终报告审核
-- [x] 工具审批中断恢复
-- [ ] 任务取消
-- [ ] 会话列表
-- [ ] 会话权限隔离
-
-## 十一、前端
-
-- [ ] Next.js 项目
-- [ ] 聊天页面
-- [ ] SSE Hook
-- [ ] 状态展示
-- [ ] 搜索活动面板
-- [ ] 工具活动面板
-- [ ] 代码输出展示
-- [ ] 引用展示
-- [ ] 报告 Markdown 渲染
-- [ ] Mermaid 图表
-- [ ] 会话历史
-- [ ] 人工审核界面
-- [ ] 文件上传
-- [ ] 文件下载
-
-## 十二、扩展功能
-
-- [ ] MCP
-- [ ] ASR
-- [ ] TTS
-- [ ] 报告导出
-- [ ] 定时任务
-- [ ] Webhook
-- [ ] API 鉴权
-- [ ] 请求限流
-- [ ] Prometheus 指标
-- [ ] OpenAPI
-- [ ] Docker Compose
-- [ ] Benchmark
-- [ ] 完整测试
+1. 在用户配置的 DeepSeek 与搜索 Provider 下完成真实 Web/Deep Research 多轮验收，并核对引用与结论的支持关系。
+2. 验证原 Compose 部署及数据卷恢复，并按目标环境验收 RAG、MCP、浏览器/桌面操作。
+3. 对照 Weaver 固定 commit 逐页比较交互和视觉差异，并记录仍不复现的行为。
+4. 确认公开 API 与两个 SDK 的路径、参数、事件和错误语义没有契约漂移。

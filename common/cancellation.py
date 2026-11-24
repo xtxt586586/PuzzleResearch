@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -38,6 +39,14 @@ class CancellationToken:
     _cleanup_callbacks: list[
         Callable[[], Awaitable[None]]
     ] = field(default_factory=list, repr=False)
+    _on_terminal: Callable[[], None] | None = field(
+        default=None,
+        repr=False,
+    )
+
+    def _notify_terminal(self) -> None:
+        if self._on_terminal is not None:
+            self._on_terminal()
 
     @property
     def is_cancelled(self) -> bool:
@@ -52,6 +61,7 @@ class CancellationToken:
         self.status = TaskStatus.CANCELLED
         self.metadata["cancel_reason"] = reason
         self._event.set()
+        self._notify_terminal()
 
     def check(self, checkpoint: str = "") -> None:
         if checkpoint:
@@ -84,11 +94,13 @@ class CancellationToken:
     def mark_completed(self) -> None:
         if not self._cancelled:
             self.status = TaskStatus.COMPLETED
+            self._notify_terminal()
 
     def mark_failed(self, error: str) -> None:
         if not self._cancelled:
             self.status = TaskStatus.FAILED
             self.metadata["error"] = error
+            self._notify_terminal()
 
     def register_cleanup(
         self,
@@ -125,9 +137,31 @@ class CancellationToken:
 
 
 class CancellationManager:
-    def __init__(self) -> None:
-        self._tokens: dict[str, CancellationToken] = {}
+    def __init__(self, max_tokens: int = 1000) -> None:
+        if max_tokens < 1:
+            raise ValueError("max_tokens must be at least 1")
+        self.max_tokens = max_tokens
+        self._tokens: OrderedDict[str, CancellationToken] = OrderedDict()
         self._lock = asyncio.Lock()
+
+    def _prune_terminal(self) -> None:
+        terminal_statuses = {
+            TaskStatus.COMPLETED,
+            TaskStatus.CANCELLED,
+            TaskStatus.FAILED,
+        }
+        while len(self._tokens) > self.max_tokens:
+            oldest_terminal = next(
+                (
+                    task_id
+                    for task_id, token in self._tokens.items()
+                    if token.status in terminal_statuses
+                ),
+                None,
+            )
+            if oldest_terminal is None:
+                return
+            del self._tokens[oldest_terminal]
 
     async def create_token(
         self,
@@ -144,8 +178,11 @@ class CancellationManager:
             token = CancellationToken(
                 task_id=task_id,
                 metadata=dict(metadata or {}),
+                _on_terminal=self._prune_terminal,
             )
             self._tokens[task_id] = token
+            self._tokens.move_to_end(task_id)
+            self._prune_terminal()
             return token
 
     def create_token_sync(
@@ -161,8 +198,11 @@ class CancellationManager:
         token = CancellationToken(
             task_id=task_id,
             metadata=dict(metadata or {}),
+            _on_terminal=self._prune_terminal,
         )
         self._tokens[task_id] = token
+        self._tokens.move_to_end(task_id)
+        self._prune_terminal()
         return token
 
     def get_token(
@@ -193,7 +233,7 @@ class CancellationManager:
         cancelled_count = 0
 
         async with self._lock:
-            for token in self._tokens.values():
+            for token in list(self._tokens.values()):
                 if token.status not in {
                     TaskStatus.PENDING,
                     TaskStatus.RUNNING,

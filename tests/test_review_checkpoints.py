@@ -260,7 +260,7 @@ class ReviewCheckpointGraphTests(unittest.TestCase):
             }
             approved = graph.invoke(Command(resume=True), config=config)
 
-        self.assertEqual(observed["tree_calls"], 1)
+        self.assertEqual(observed["tree_calls"], len(expected_task_ids))
         self.assertEqual(approved["status"], "completed")
         self.assertEqual(
             {task["task_id"] for task in observed["writer_state"]["tasks"]},

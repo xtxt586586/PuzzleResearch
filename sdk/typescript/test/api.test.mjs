@@ -32,7 +32,7 @@ function sseResponse() {
 
 function dataProtocolResponse() {
   return new Response(
-    '0: {"ok":true}\n',
+    '0: {"type":"data","data":{"ok":true}}\n',
     {
       status: 200,
       headers: {
@@ -47,13 +47,41 @@ async function fakeFetch(input, init = {}) {
   const url = new URL(String(input))
 
   calls.push({
-    method: init.method ?? "GET",
-    path: url.pathname,
-    init,
-  })
+  method: init.method ?? "GET",
+  path: url.pathname,
+  search: url.search,
+  init,
+})
 
   if (url.pathname === "/api/chat/sse") {
     return sseResponse()
+  }
+
+  if (url.pathname === "/api/mcp/diagnose") {
+    return new Response(
+      JSON.stringify({
+        enabled: true,
+        status: "degraded",
+        ready: false,
+        server_count: 1,
+        connected_count: 0,
+        servers: [
+          {
+            server_id: "demo",
+            transport: "sse",
+            status: "not_loaded",
+            loaded_tools: 0,
+            message: "服务器尚未成功加载。",
+          },
+        ],
+      }),
+      {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+        },
+      },
+    )
   }
 
   if (url.pathname === "/api/research/sse") {
@@ -110,7 +138,7 @@ const chatEvents = await collect(
 )
 
 assert.equal(chatEvents.length, 1)
-assert.equal(chatEvents[0].event, "message")
+assert.equal(chatEvents[0].type, "message")
 
 const researchEvents = await collect(
   client.research({
@@ -119,7 +147,7 @@ const researchEvents = await collect(
 )
 
 assert.equal(researchEvents.length, 1)
-assert.deepEqual(researchEvents[0].value, {
+assert.deepEqual(researchEvents[0].data, {
   ok: true,
 })
 
@@ -160,6 +188,9 @@ await client.updateMcpConfig({
   enabled: true,
 })
 
+const mcpDiagnosis = await client.diagnoseMcp()
+assert.equal(mcpDiagnosis.status, "degraded")
+assert.equal(mcpDiagnosis.servers[0].server_id, "demo")
 await client.diagnoseBrowser()
 await client.getExportTemplates()
 
@@ -184,6 +215,7 @@ const expectedRoutes = [
   ["POST", "/api/interrupt/resume"],
   ["GET", "/api/mcp/config"],
   ["POST", "/api/mcp/config"],
+  ["GET", "/api/mcp/diagnose"],
   ["GET", "/api/sandbox/browser/diagnose"],
   ["GET", "/api/export/templates"],
   ["GET", "/api/export/thread%2Fone"],
@@ -197,3 +229,18 @@ assert.deepEqual(
 assert.equal(client.lastThreadId, "thread-001")
 
 console.log("api.test.mjs passed")
+
+assert.equal(
+  calls[2].init.method,
+  "POST",
+)
+
+assert.equal(
+  calls[2].init.body,
+  undefined,
+)
+
+assert.equal(
+  calls[2].search,
+  "?query=test",
+)

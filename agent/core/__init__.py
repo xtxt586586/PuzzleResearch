@@ -24,6 +24,12 @@ __all__ = [
     "RouteDecision",
     "SmartRouter",
     "smart_route",
+    "maybe_strip_tool_messages",
+    "ContextManager",
+    "TruncationConfig",
+    "TokenStats",
+    "get_context_manager",
+    "truncate_for_model",
 ]
 
 
@@ -41,6 +47,12 @@ _SYMBOL_TO_MODULE: dict[str, str] = {
     "RouteDecision": "agent.core.smart_router",
     "SmartRouter": "agent.core.smart_router",
     "smart_route": "agent.core.smart_router",
+    "maybe_strip_tool_messages": "agent.core.middleware",
+    "ContextManager": "agent.core.context_manager",
+    "TruncationConfig": "agent.core.context_manager",
+    "TokenStats": "agent.core.context_manager",
+    "get_context_manager": "agent.core.context_manager",
+    "truncate_for_model": "agent.core.context_manager",
 }
 
 

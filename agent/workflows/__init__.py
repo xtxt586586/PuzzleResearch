@@ -4,12 +4,21 @@ from agent.workflows.planner_agent import (
     PlannerAgentResult,
     PlannerTask,
 )
+from agent.workflows.coordinator import (
+    CoordinatorAgent,
+    CoordinatorAgentResult,
+    CoordinatorDecision,
+    CoordinatorTask,
+)
 from agent.workflows.research_agent import (
     ResearchAgent,
     ResearchAgentResult,
     ResearchTask,
 )
 from agent.workflows.role_agents import (
+    EvaluatorAgent,
+    EvaluatorAgentResult,
+    EvaluatorTask,
     VerifierAgent,
     VerifierAgentResult,
     VerifierTask,
@@ -19,6 +28,10 @@ from agent.workflows.role_agents import (
 )
 
 __all__ = [
+    "CoordinatorAgentResult",
+    "CoordinatorAgent",
+    "CoordinatorDecision",
+    "CoordinatorTask",
     "PlannedQuery",
     "PlannerAgent",
     "PlannerAgentResult",
@@ -26,6 +39,9 @@ __all__ = [
     "ResearchAgent",
     "ResearchAgentResult",
     "ResearchTask",
+    "EvaluatorAgent",
+    "EvaluatorAgentResult",
+    "EvaluatorTask",
     "VerifierAgent",
     "VerifierAgentResult",
     "VerifierTask",

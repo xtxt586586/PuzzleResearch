@@ -14,6 +14,7 @@ _POLICY_FIELDS = {
     "deduplicate_tool_calls",
     "cache_tool_results",
     "max_tool_result_chars",
+    "browser_context_helper",
 }
 
 def _runtime_policy(
@@ -85,6 +86,15 @@ def runtime_profile_from_record(
         model=record.model.strip() or None,
         enabled_tools=enabled_tools,
         blocked_tools=blocked_tools,
+        mcp_servers=(
+            None
+            if record.mcp_servers is None
+            else frozenset(
+                server_id
+                for server_id, enabled in record.mcp_servers.items()
+                if enabled
+            )
+        ),
         tool_call_limit=policy.get(
             "tool_call_limit"
         ),
@@ -102,5 +112,8 @@ def runtime_profile_from_record(
         ),
         max_tool_result_chars=policy.get(
             "max_tool_result_chars"
+        ),
+        browser_context_helper=policy.get(
+            "browser_context_helper"
         ),
     )

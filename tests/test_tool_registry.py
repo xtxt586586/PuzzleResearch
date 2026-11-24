@@ -1,6 +1,11 @@
 import unittest
 
-from tools.registry import ToolDefinition, ToolRegistry
+from tools.registry import (
+    ToolDefinition,
+    ToolRegistry,
+    get_tool_usage_stats,
+    reset_tool_usage_stats,
+)
 
 
 def add_numbers(
@@ -11,6 +16,54 @@ def add_numbers(
 
 
 class ToolRegistryTests(unittest.TestCase):
+    def test_invocations_record_usage_statistics(self):
+        reset_tool_usage_stats()
+        self.addCleanup(reset_tool_usage_stats)
+
+        def fail() -> None:
+            raise RuntimeError("tool failure")
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="add_numbers",
+                    description="计算两个整数的和",
+                    handler=add_numbers,
+                ),
+                ToolDefinition(
+                    name="failing_tool",
+                    description="用于验证失败统计",
+                    handler=fail,
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            registry.invoke(
+                "add_numbers",
+                {"left": 2, "right": 3},
+            ),
+            5,
+        )
+        with self.assertRaisesRegex(RuntimeError, "tool failure"):
+            registry.invoke("failing_tool")
+
+        stats = registry.get_statistics()
+        self.assertEqual(stats["total_calls"], 2)
+        self.assertEqual(stats["total_successes"], 1)
+        self.assertEqual(stats["overall_success_rate"], 0.5)
+        self.assertEqual(
+            get_tool_usage_stats("failing_tool")["failure_count"],
+            1,
+        )
+        metadata = registry.get("add_numbers").metadata()
+        self.assertEqual(metadata["call_count"], 1)
+        self.assertEqual(metadata["success_count"], 1)
+        self.assertEqual(metadata["failure_count"], 0)
+        self.assertGreaterEqual(metadata["average_duration_ms"], 0.0)
+        self.assertTrue(metadata["last_called"])
+        self.assertEqual(metadata["return_type"], "int")
+
     def test_register_and_invoke_tool(self):
         registry = ToolRegistry(
             [

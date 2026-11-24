@@ -1,0 +1,3 @@
+{"id":"case_001","query":"2026年中国新能源汽车出口的最新趋势","constraints":{"freshness_days":30},"expected_fields":["出口量","主要市场","同比变化"],"metadata":{"domain":"industry"}}
+{"id":"case_002","query":"比较当前主流开源大语言模型的许可与能力","constraints":{"must_compare":true},"expected_fields":["模型名称","许可证","能力","适用场景"],"metadata":{"domain":"technology"}}
+{"id":"case_003","query":"近期中国药监部门对人工智能医疗器械的指导更新","constraints":{"jurisdiction":"CN"},"expected_fields":["文件名称","发布日期","适用范围","主要变化"],"metadata":{"domain":"medical"}}

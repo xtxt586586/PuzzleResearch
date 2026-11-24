@@ -22,6 +22,8 @@ class AgentProfile:
 
     blocked_tools: frozenset[str] | None = None
 
+    mcp_servers: frozenset[str] | None = None
+
     tool_call_limit: int | None = None
 
     require_tool_approval: bool | None = None
@@ -33,6 +35,8 @@ class AgentProfile:
     cache_tool_results: bool | None = None
 
     max_tool_result_chars: int | None = None
+
+    browser_context_helper: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -71,6 +75,18 @@ class AgentProfile:
                 self,
                 "blocked_tools",
                 normalized_blocked_tools,
+            )
+
+        if self.mcp_servers is not None:
+            normalized_servers = frozenset(
+                str(server_id).strip()
+                for server_id in self.mcp_servers
+                if str(server_id).strip()
+            )
+            object.__setattr__(
+                self,
+                "mcp_servers",
+                normalized_servers,
             )
 
         if self.max_tool_result_chars is not None:

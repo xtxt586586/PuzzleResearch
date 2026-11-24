@@ -37,6 +37,7 @@ from agent.core.event_stream import (
 from agent.workflows.stuck_middleware import detect_stuck, inject_stuck_hint
 from agent.workflows.research_tree import (
     ResearchTree,
+    ResearchNodeStatus,
     TreeExplorationBudgetExceeded,
     TreeExplorer,
 )
@@ -75,6 +76,8 @@ from agent.workflows.viz_planner import (
 from agent.workflows.claim_verifier import ClaimStatus, ClaimVerifier
 from agent.workflows.planner_agent import PlannerAgent, PlannerTask
 from agent.workflows.role_agents import (
+    EvaluatorAgent,
+    EvaluatorTask,
     VerifierAgent,
     VerifierTask,
     WriterAgent,
@@ -210,6 +213,7 @@ def _store_research_budget(
         **budget_state_fields(refreshed),
         "stop_reason": refreshed["stop_reason"],
         "tokens_used": int(refreshed.get("tokens_used", 0) or 0),
+        "token_usage_by_stage": dict(refreshed.get("token_usage_by_stage") or {}),
         "elapsed_seconds": float(refreshed.get("elapsed_seconds", 0.0) or 0.0),
         "searches_used": int(refreshed.get("searches_used", 0) or 0),
         "max_seconds": float(refreshed.get("max_seconds", 0.0) or 0.0),
@@ -232,24 +236,36 @@ def _record_research_model_usage(
     budget: Mapping[str, Any],
     messages: Any,
     response: Any,
+    *,
+    stage: str | None = None,
 ) -> dict[str, Any]:
     return add_budget_tokens(
         budget,
         model_call_tokens(messages, response),
+        stage=stage,
     )
 
 
 def _research_budget_allows_call(
     budget: Mapping[str, Any],
     messages: Any,
+    *,
+    reserve_tokens: int = 0,
 ) -> tuple[dict[str, Any], bool]:
     refreshed = refresh_research_budget(budget)
     if refreshed["stop_reason"]:
         return refreshed, False
 
     max_tokens = max(int(refreshed.get("max_tokens", 0) or 0), 0)
-    if max_tokens and int(refreshed.get("tokens_used", 0) or 0) + estimate_tokens(messages) >= max_tokens:
-        refreshed["stop_reason"] = "token_budget_exceeded"
+    reserve = max(0, int(reserve_tokens or 0))
+    if max_tokens and (
+        int(refreshed.get("tokens_used", 0) or 0)
+        + estimate_tokens(messages)
+        + reserve
+        >= max_tokens
+    ):
+        if reserve == 0:
+            refreshed["stop_reason"] = "token_budget_exceeded"
         return refreshed, False
 
     return refreshed, True
@@ -288,6 +304,26 @@ def _budget_limited_research_report(
     if not results:
         lines.append("预算耗尽前没有取得可引用的搜索材料。")
     return "\n".join(lines).strip()
+
+
+def _compact_report_for_evaluation(report: str, max_chars: int = 2200) -> str:
+    """Keep section coverage and conclusions while bounding evaluator input."""
+    text = str(report or "").strip()
+    if len(text) <= max_chars:
+        return text
+
+    headings = list(dict.fromkeys(re.findall(r"(?m)^#{1,3}\s+.+$", text)))
+    heading_budget = min(700, max_chars // 3)
+    heading_text = "\n".join(headings)[:heading_budget]
+    remaining = max_chars - len(heading_text) - 80
+    head_size = remaining * 2 // 3
+    tail_size = remaining - head_size
+    return (
+        f"{text[:head_size].rstrip()}\n\n"
+        "[中间正文已省略；以下保留报告章节结构及结论片段]\n"
+        f"{heading_text}\n\n"
+        f"{text[-tail_size:].lstrip()}"
+    )
 
 
 def _extract_response_text(response: Any) -> str:
@@ -1029,11 +1065,24 @@ def web_plan_node(
             seen.add(query_key)
 
     reasoning = ""
+    planner_agent_result: dict[str, Any] = {
+        "task_id": f"web-plan-{hashlib.sha1(user_input.encode('utf-8')).hexdigest()[:12]}",
+        "status": "completed",
+        "queries": [],
+        "reasoning": "",
+        "error": "",
+        "model_tokens": 0,
+    }
 
     # Router 已经给出搜索建议时，优先复用，减少一次模型调用。
     if queries:
         queries = queries[:max_queries]
         reasoning = "复用 Router 提供的搜索建议。"
+        planner_agent_result.update({
+            "queries": [{"query": query, "priority": max(1, max_queries - index)}
+                        for index, query in enumerate(queries)],
+            "reasoning": reasoning,
+        })
 
     else:
         messages = [
@@ -1082,15 +1131,24 @@ def web_plan_node(
                 raise ValueError(planned.error or "PlannerAgent failed")
             queries = [item.query for item in planned.queries]
             reasoning = planned.reasoning
+            planner_agent_result = planned.model_dump(mode="json")
 
         except Exception as exc:
             print(f"{web_plan_node}查询规划失败，使用原问题：{exc}")
             queries = [user_input]
             reasoning = "规划模型失败，直接使用用户原始问题搜索。"
+            planner_agent_result.update({
+                "status": "failed",
+                "queries": [{"query": user_input, "priority": 1}],
+                "reasoning": reasoning,
+                "error": str(exc)[:1000],
+            })
 
     if not queries:
         queries = [user_input]
         reasoning = "没有生成有效查询，直接使用用户原始问题搜索。"
+        planner_agent_result["queries"] = [{"query": user_input, "priority": 1}]
+        planner_agent_result["reasoning"] = reasoning
 
     print(
         "[web_plan_node]",
@@ -1100,6 +1158,7 @@ def web_plan_node(
 
     return {
         "research_plan": queries,
+        "planner_agent_result": planner_agent_result,
         "revision_count": 0,
         "max_revisions": max(
             int(getattr(settings,"max_revisions",2)),
@@ -1152,13 +1211,27 @@ def deep_plan_node(
             seen.add(query_key)
 
     reasoning = ""
+    planner_agent_result: dict[str, Any] = {
+        "task_id": f"deep-plan-{hashlib.sha1(user_input.encode('utf-8')).hexdigest()[:12]}",
+        "status": "completed",
+        "queries": [],
+        "reasoning": "",
+        "error": "",
+        "model_tokens": 0,
+    }
 
     if queries:
         queries = queries[:max_queries]
         reasoning = "复用 Router 提供的深度研究查询建议。"
+        planner_agent_result.update({
+            "queries": [{"query": query, "priority": max(1, max_queries - index)}
+                        for index, query in enumerate(queries)],
+            "reasoning": reasoning,
+        })
         research_budget = add_budget_tokens(
             research_budget,
             estimate_tokens(queries),
+            stage="planner_input",
         )
 
     else:
@@ -1196,10 +1269,22 @@ def deep_plan_node(
         if research_budget["stop_reason"]:
             queries = [user_input]
             reasoning = "研究预算在规划前已耗尽，使用原始问题并停止后续研究。"
+            planner_agent_result.update({
+                "status": "failed",
+                "queries": [{"query": user_input, "priority": 1}],
+                "reasoning": reasoning,
+                "error": research_budget["stop_reason"],
+            })
         elif max_tokens and int(research_budget["tokens_used"]) + prompt_tokens >= max_tokens:
             research_budget["stop_reason"] = "token_budget_exceeded"
             queries = [user_input]
             reasoning = "规划请求将超出 token 预算，使用原始问题并停止后续研究。"
+            planner_agent_result.update({
+                "status": "failed",
+                "queries": [{"query": user_input, "priority": 1}],
+                "reasoning": reasoning,
+                "error": research_budget["stop_reason"],
+            })
         else:
             try:
                 planned = PlannerAgent(ModelFactory.for_task).run(
@@ -1210,6 +1295,15 @@ def deep_plan_node(
                         instructions="拆解深度研究主题，提出覆盖互补角度的可搜索问题。",
                         context=user_input,
                         max_queries=max_queries,
+                        max_output_tokens=max(
+                            1,
+                            min(
+                                1024,
+                                max_tokens
+                                - int(research_budget["tokens_used"])
+                                - prompt_tokens,
+                            ) // 2,
+                        ),
                         messages=messages,
                     ),
                     config=config,
@@ -1219,14 +1313,22 @@ def deep_plan_node(
                 research_budget = add_budget_tokens(
                     research_budget,
                     planned.model_tokens,
+                    stage="planner",
                 )
                 queries = [item.query for item in planned.queries]
                 reasoning = planned.reasoning
+                planner_agent_result = planned.model_dump(mode="json")
 
             except Exception as exc:
                 print(f"[deep_plan_node] 规划失败，使用原问题：{exc}")
                 queries = [user_input]
                 reasoning = "深度规划失败，使用用户原始问题搜索。"
+                planner_agent_result.update({
+                    "status": "failed",
+                    "queries": [{"query": user_input, "priority": 1}],
+                    "reasoning": reasoning,
+                    "error": str(exc)[:1000],
+                })
 
     if not queries:
         queries = [user_input]
@@ -1301,6 +1403,7 @@ def deep_plan_node(
     )
     return {
         "research_plan": queries,
+        "planner_agent_result": planner_agent_result,
         "revision_count": 0,
         "max_revisions": max(
             int(getattr(settings,"max_revisions",2)),
@@ -1446,6 +1549,14 @@ def deep_followup_plan_node(
 
     candidates: list[str] = []
     reasoning = ""
+    planner_agent_result: dict[str, Any] = {
+        "task_id": f"followup-plan-{current_epoch}-{hashlib.sha1(user_input.encode('utf-8')).hexdigest()[:12]}",
+        "status": "completed",
+        "queries": [],
+        "reasoning": "",
+        "error": "",
+        "model_tokens": 0,
+    }
 
     research_budget, can_call_model = _research_budget_allows_call(
         research_budget,
@@ -1479,14 +1590,18 @@ def deep_followup_plan_node(
             research_budget = add_budget_tokens(
                 research_budget,
                 planned.model_tokens,
+                stage="followup_planner",
             )
             candidates = [item.query for item in planned.queries]
             reasoning = planned.reasoning
+            planner_agent_result = planned.model_dump(mode="json")
 
         except Exception as exc:
             print(f"[deep_followup_plan_node] \n规划失败，使用缺口生成查询：{exc}")
+            planner_agent_result.update({"status": "failed", "error": str(exc)[:1000]})
     else:
         reasoning = "研究预算已耗尽，跳过后续规划模型调用。"
+        planner_agent_result.update({"status": "failed", "error": research_budget.get("stop_reason", "token_budget_exceeded")})
 
 
     queries: list[str] = []
@@ -1548,6 +1663,11 @@ def deep_followup_plan_node(
             })
             return {
                 "research_plan": [],
+                "planner_agent_result": {
+                    **planner_agent_result,
+                    "status": "failed",
+                    "error": research_budget.get("stop_reason", "token_budget_exceeded"),
+                },
                 "deepsearch_artifacts": artifacts,
                 **budget_state_fields(research_budget),
                 "current_step": 2,
@@ -1556,6 +1676,12 @@ def deep_followup_plan_node(
         raise ValueError(
             "后续研究没有生成新的查询。"
         )
+
+    planner_agent_result["queries"] = [
+        {"query": query, "priority": max(1, len(queries) - index)}
+        for index, query in enumerate(queries)
+    ]
+    planner_agent_result["reasoning"] = reasoning
 
     next_query_history = merge_query_history(query_history, queries)
 
@@ -1601,6 +1727,7 @@ def deep_followup_plan_node(
 
     return {
         "research_plan": queries,
+        "planner_agent_result": planner_agent_result,
         "research_tree": research_tree.to_dict(),
         "current_branch_id": research_tree.root_id,
         "deepsearch_epoch": next_epoch,
@@ -1786,6 +1913,7 @@ def deep_linear_search_node(
         budget = add_budget_tokens(
             budget,
             _estimate_deepsearch_tokens(query),
+            stage="search_context",
         )
         if budget["stop_reason"]:
             break
@@ -1834,6 +1962,7 @@ def deep_linear_search_node(
         budget = add_budget_tokens(
             budget,
             _estimate_search_result_tokens(result.get("search_results", []) or []),
+            stage="search_context",
         )
 
         budget = refresh_research_budget(budget)
@@ -2365,12 +2494,32 @@ def deep_tree_search_node(
         mode="tree",
         error=tree_error,
     )
-    merged_summary = explorer.get_final_summary()
+    if assigned_tasks:
+        merged_summary = "\n\n".join(
+            f"## {node.topic}\n{node.summary}"
+            for node in tree.nodes.values()
+            if node.depth > 0
+            and node.status == ResearchNodeStatus.COMPLETED
+            and node.summary
+        )
+    else:
+        merged_summary = explorer.get_final_summary()
     budget_stats = explorer.get_budget_stats()
     research_budget["tokens_used"] = max(
         int(research_budget.get("tokens_used", 0) or 0),
         int(budget_stats.get("tokens_used", 0) or 0),
     )
+    stage_usage = dict(research_budget.get("token_usage_by_stage") or {})
+    for stage, count in (budget_stats.get("token_usage_by_stage") or {}).items():
+        try:
+            stage_usage[str(stage)] = max(
+                int(stage_usage.get(str(stage), 0) or 0),
+                0,
+            ) + max(int(count or 0), 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if stage_usage:
+        research_budget["token_usage_by_stage"] = stage_usage
     research_budget["searches_used"] = (
         int(research_budget.get("searches_used", 0) or 0)
         + int(budget_stats.get("searches_used", 0) or 0)
@@ -2664,11 +2813,11 @@ def deep_writer_node(
         search_results,
         original_query=user_input,
     )
-    selected_results = aggregated.to_dicts(limit=20)
+    selected_results = aggregated.to_dicts(limit=6)
     if not selected_results:
         selected_results = _select_deep_search_results(
             search_results,
-            max_sources=20,
+            max_sources=6,
         )
 
     context_blocks: list[str] = []
@@ -2683,7 +2832,7 @@ def deep_writer_node(
         snippet = str(item.get("snippet","")).strip()
         content = str(item.get("content","")).strip()
 
-        excerpt = (content or snippet)[:2200]
+        excerpt = (content or snippet)[:1200]
 
         context_blocks.append(
             f"【来源 {index}】\n"
@@ -2696,7 +2845,7 @@ def deep_writer_node(
     research_context = "\n\n".join(context_blocks)
     tree_summary = str(
         (state.get("deepsearch_artifacts") or {}).get("tree_summary", "")
-    ).strip()
+    ).strip()[:1200]
     human_guidance = str(state.get("human_guidance", "") or "").strip()
     if tree_summary:
         research_context = (
@@ -2705,6 +2854,7 @@ def deep_writer_node(
             + research_context
         )
 
+    budget_skip_reason = ""
     if research_budget.get("stop_reason"):
         answer = _budget_limited_research_report(
             user_input,
@@ -2720,22 +2870,52 @@ def deep_writer_node(
             "elapsed_seconds": 0.0,
         }
     else:
+        budget_limited = False
+        max_tokens = max(int(research_budget.get("max_tokens", 0) or 0), 0)
+        evaluator_token_reserve = (
+            min(8000, max(3072, int(max_tokens * 0.45)))
+            if max_tokens >= 4096
+            else 0
+        )
+        evaluator_time_reserve = min(
+            25.0,
+            max(1.0, float(research_budget.get("max_seconds", 0) or 0) * 0.2),
+        )
+        remaining_seconds = max(
+            0.0,
+            float(research_budget.get("max_seconds", 0) or 0)
+            - float(research_budget.get("elapsed_seconds", 0) or 0),
+        )
+        writer_timeout = max(
+            1,
+            min(
+                int(getattr(settings, "model_timeout", 60) or 60),
+                int(remaining_seconds - evaluator_time_reserve),
+            ),
+        )
         llm = ModelFactory.for_task(
             "writing",
             temperature=0.3,
+            timeout=writer_timeout,
             config=config,
         )
         writer_task = WriterTask(
             task_id=f"writer-{state.get('thread_id') or 'session'}-{state.get('deepsearch_epoch', 1)}",
             question=user_input,
-            evidence=selected_results,
+            evidence=[
+                {
+                    **{key: value for key, value in item.items() if key != "content"},
+                    "snippet": str(item.get("content") or item.get("snippet") or "")[:350],
+                }
+                for item in selected_results[:5]
+            ],
             research_summary=tree_summary,
             guidance=human_guidance,
             images=[item for item in (state.get("images") or []) if isinstance(item, dict)],
         )
 
         def generate_report(task: WriterTask) -> str:
-            nonlocal research_budget
+            nonlocal research_budget, budget_limited, budget_skip_reason
             task_context_blocks: list[str] = []
             if task.research_summary:
                 task_context_blocks.append(
@@ -2752,7 +2932,7 @@ def deep_writer_node(
                     f"所属查询：{query}\n"
                     f"标题：{title}\n"
                     f"链接：{url}\n"
-                    f"内容：{(content or snippet)[:2200]}"
+                    f"内容：{(content or snippet)[:1200]}"
                 )
             task_evidence_context = "\n\n".join(task_context_blocks)
             messages = [
@@ -2761,6 +2941,8 @@ def deep_writer_node(
                         f"{get_prompt_manager(config).get_prompt('deep_writer')}"
                         "引用来源时使用 [来源1]、[来源2] 格式。"
                         "建议使用清晰的标题和小节。"
+                        "报告控制在约 2500 个中文字符，优先保留结论、证据、限制和选型建议。"
+                        "避免重复转述来源原文。"
                         "直接输出完整报告，不要描述内部工作流程。"
                     )
                 ),
@@ -2776,16 +2958,67 @@ def deep_writer_node(
                 ),
             ]
             messages = _apply_agent_system_prompt(messages, config)
-            response = llm.invoke(messages, config=config)
+            research_budget, can_call_model = _research_budget_allows_call(
+                research_budget,
+                messages,
+                reserve_tokens=evaluator_token_reserve,
+            )
+            current_remaining_seconds = max(
+                0.0,
+                float(research_budget.get("max_seconds", 0) or 0)
+                - float(research_budget.get("elapsed_seconds", 0) or 0),
+            )
+            if current_remaining_seconds <= evaluator_time_reserve + 1:
+                can_call_model = False
+                budget_skip_reason = "evaluator_time_reserved"
+            if not can_call_model:
+                budget_limited = True
+                budget_skip_reason = budget_skip_reason or "evaluator_budget_reserved"
+                return _budget_limited_research_report(
+                    user_input,
+                    selected_results,
+                    str(research_budget.get("stop_reason") or budget_skip_reason),
+                )
+            remaining_tokens = max(
+                0,
+                int(research_budget["max_tokens"])
+                - int(research_budget["tokens_used"])
+                - estimate_tokens(messages)
+                - evaluator_token_reserve
+                - max(128, int(max_tokens * 0.03)),
+            )
+            if remaining_tokens <= 0:
+                budget_limited = True
+                budget_skip_reason = "evaluator_budget_reserved"
+                return _budget_limited_research_report(
+                    user_input,
+                    selected_results,
+                    budget_skip_reason,
+                )
+            bounded_llm = llm
+            bind = getattr(llm, "bind", None)
+            if callable(bind):
+                bounded_llm = bind(max_tokens=min(1024, remaining_tokens))
+            response = bounded_llm.invoke(messages, config=config)
             research_budget = _record_research_model_usage(
                 research_budget,
                 messages,
                 response,
+                stage="writer",
             )
             return _extract_response_text(response)
 
         writer_result = WriterAgent(generate_report).run(writer_task)
         writer_agent_result = writer_result.model_dump(mode="json")
+        if budget_limited:
+            writer_agent_result.update({
+                "status": "skipped",
+                "error": str(
+                    research_budget.get("stop_reason")
+                    or budget_skip_reason
+                    or "token_budget_exceeded"
+                ),
+            })
         if writer_result.status != "completed":
             raise RuntimeError(writer_result.error or "Writer Agent failed")
         answer = writer_result.report
@@ -2842,6 +3075,7 @@ def deep_writer_node(
     quality_summary.update({
         "budget_stop_reason": research_budget.get("stop_reason", ""),
         "tokens_used": research_budget.get("tokens_used", 0),
+        "token_usage_by_stage": dict(research_budget.get("token_usage_by_stage") or {}),
         "elapsed_seconds": research_budget.get("elapsed_seconds", 0.0),
         "searches_used": research_budget.get("searches_used", 0),
         "max_seconds": research_budget.get("max_seconds", 0.0),
@@ -2889,7 +3123,67 @@ def deep_writer_node(
 
 
 
-def evaluator_node(
+def verifier_agent_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str, Any]:
+    """Verify report claims in a read-only role before evaluation."""
+    epoch = max(int(state.get("deepsearch_epoch", 1) or 1), 1)
+    task_id = f"verifier-{state.get('thread_id') or 'session'}-{epoch}"
+    report = str(state.get("draft_report") or state.get("final_report") or "").strip()
+    scraped_content = list(state.get("scraped_content") or [])
+    search_results = list(state.get("search_results") or [])
+    if not scraped_content and search_results:
+        scraped_content = [{"results": search_results}]
+
+    if not report:
+        result = {
+            "task_id": task_id,
+            "status": "empty",
+            "claims": [],
+            "verified_count": 0,
+            "unsupported_count": 0,
+            "contradicted_count": 0,
+            "tools_used": [],
+            "error": "没有可核查的研究报告。",
+            "elapsed_seconds": 0.0,
+        }
+    else:
+        verifier = ClaimVerifier(
+            min_overlap_tokens=int(
+                getattr(settings, "deepsearch_claim_verifier_min_overlap_tokens", 2)
+            ),
+            max_evidence_per_claim=int(
+                getattr(settings, "deepsearch_claim_verifier_max_evidence_per_claim", 3)
+            ),
+        )
+        verifier_task = VerifierTask(
+            task_id=task_id,
+            report=report,
+            scraped_content=scraped_content,
+            passages=(
+                list(state.get("passages") or [])
+                if bool(getattr(settings, "deepsearch_claim_verifier_use_passages", True))
+                else []
+            ),
+        )
+        result = VerifierAgent(verifier).run(verifier_task).model_dump(mode="json")
+
+    artifacts = dict(state.get("deepsearch_artifacts") or {})
+    artifacts["claims"] = list(result.get("claims") or [])
+    artifacts["verifier_agent"] = dict(result)
+    artifacts["claim_verifier"] = {
+        "contradicted_count": int(result.get("contradicted_count", 0) or 0),
+        "unsupported_count": int(result.get("unsupported_count", 0) or 0),
+        "verified_count": int(result.get("verified_count", 0) or 0),
+    }
+    return {
+        "verifier_agent_result": result,
+        "deepsearch_artifacts": artifacts,
+    }
+
+
+def _evaluate_report_node(
         state: AgentState,
         config: RunnableConfig,
 ) -> Dict[str, Any]:
@@ -2956,7 +3250,7 @@ def evaluator_node(
     if state.get("route") == "deep":
         source_items = _select_deep_search_results(
             sources,
-            max_sources=20,
+            max_sources=6,
         )
     else:
         source_items = list(sources[:12])
@@ -2977,9 +3271,22 @@ def evaluator_node(
 
     source_context = "\n".join(sources_lines)
 
+    remaining_seconds = max(
+        0.0,
+        float(research_budget.get("max_seconds", 0) or 0)
+        - float(research_budget.get("elapsed_seconds", 0) or 0),
+    )
+    evaluator_timeout = max(
+        1,
+        min(
+            int(getattr(settings, "model_timeout", 60) or 60),
+            int(remaining_seconds),
+        ),
+    )
     llm = ModelFactory.for_task(
         "evaluation",
         temperature=0.0,
+        timeout=evaluator_timeout,
         config=config,
     )
 
@@ -3017,13 +3324,16 @@ def evaluator_node(
                 "请按主题相关性检查定义、背景、核心内容、应用案例、优缺点、"
                 "相关比较、趋势以及专家观点或数据证据；不相关方面不强行补充。"
                 "gaps 中 importance 只能是 high、medium 或 low。"
+                "请保持输出简洁：evaluation 和 analysis 各不超过100字；"
+                "missing_topics、gaps、suggested_queries、covered_aspects 各最多3项，"
+                "每项简短明确，确保 JSON 完整闭合。"
             )
         ),
         HumanMessage(
             content=_build_model_user_content(
                 (
                     f"用户问题：\n{user_input}\n"
-                    f"报告：\n{report}\n"
+                    f"报告（章节摘要）：\n{_compact_report_for_evaluation(report)}\n"
                     f"可用来源：\n{source_context}\n"
                 ),
                 state.get("images"),
@@ -3036,8 +3346,73 @@ def evaluator_node(
         config,
     )
 
+    evaluator_llm = llm
+    if state.get("route") == "deep":
+        max_tokens = max(int(research_budget.get("max_tokens", 0) or 0), 0)
+        revision_count = max(int(state.get("revision_count", 0) or 0), 0)
+        max_revisions = max(int(state.get("max_revisions", 0) or 0), 0)
+        revision_cycle_reserve = (
+            min(5000, max(2048, int(max_tokens * 0.3)))
+            if max_tokens >= 4096 and revision_count < max_revisions
+            else 0
+        )
+        research_budget, evaluator_call_allowed = _research_budget_allows_call(
+            research_budget,
+            messages,
+            reserve_tokens=revision_cycle_reserve,
+        )
+        remaining_seconds = max(
+            0.0,
+            float(research_budget.get("max_seconds", 0) or 0)
+            - float(research_budget.get("elapsed_seconds", 0) or 0),
+        )
+        time_exhausted = bool(
+            research_budget.get("max_seconds") and remaining_seconds < 1
+        )
+        remaining_output_tokens = (
+            max_tokens
+            - int(research_budget.get("tokens_used", 0) or 0)
+            - estimate_tokens(messages)
+            - revision_cycle_reserve
+        )
+        if time_exhausted or not evaluator_call_allowed or (max_tokens and remaining_output_tokens < 256):
+            if not research_budget.get("stop_reason"):
+                research_budget["stop_reason"] = (
+                    "time_budget_exceeded"
+                    if time_exhausted
+                    else "token_budget_exceeded"
+                )
+            artifacts = _store_research_budget(
+                artifacts,
+                research_budget,
+                mode=budget_mode,
+            )
+            quality_summary = dict(state.get("quality_summary") or {})
+            quality_summary.update({
+                **budget_state_fields(research_budget),
+                "budget_stop_reason": research_budget["stop_reason"],
+                "evaluation_skipped": True,
+            })
+            artifacts["quality_summary"] = quality_summary
+            return {
+                "evaluation": "剩余研究预算不足以完成评估，已跳过模型评估与自动修订；当前报告仅包含已收集证据。",
+                "verdict": "budget_exhausted",
+                "eval_dimensions": {},
+                "missing_topics": [],
+                "knowledge_gap_analysis": None,
+                "quality_summary": quality_summary,
+                "deepsearch_artifacts": artifacts,
+                **budget_state_fields(research_budget),
+                "current_step": 4,
+                "status": "running",
+            }
+
+        bind = getattr(llm, "bind", None)
+        if callable(bind):
+            evaluator_llm = bind(max_tokens=min(1536, remaining_output_tokens))
+
     try:
-        response = llm.invoke(
+        response = evaluator_llm.invoke(
             messages,
             config=config,
         )
@@ -3045,6 +3420,7 @@ def evaluator_node(
             research_budget,
             messages,
             response,
+            stage="evaluator",
         )
         artifacts = _store_research_budget(
             artifacts,
@@ -3127,82 +3503,9 @@ def evaluator_node(
             and bool(getattr(settings, "deepsearch_use_gap_analysis", True))
             and current_deep_epoch < max_deep_epochs
         ):
+            # The evaluator prompt already requests this structured result. A
+            # second model call would duplicate cost and consume revision budget.
             gap_value = data.get("knowledge_gap_analysis")
-            query_history = state.get("deepsearch_query_history") or []
-            if isinstance(query_history, (list, tuple)):
-                executed_queries = "\n".join(
-                    f"- {str(query).strip()}"
-                    for query in query_history
-                    if str(query).strip()
-                )[:2000]
-            else:
-                executed_queries = ""
-            gap_messages = [
-                SystemMessage(
-                    content=(
-                        "你是研究知识缺口分析器。只返回 JSON 对象，字段为："
-                        "overall_coverage (0 到 1)、confidence (0 到 1)、"
-                        "gaps (包含 aspect、importance、reason)、suggested_queries、"
-                        "covered_aspects、analysis。按用户问题判断主题覆盖，不要把"
-                        "报告没有提及但与问题无关的方面列为缺口。"
-                    )
-                ),
-                HumanMessage(
-                    content=(
-                        f"用户问题：\n{user_input[:2000]}\n\n"
-                        f"已执行查询：\n{executed_queries or '暂无'}\n\n"
-                        f"研究报告：\n{report[:12000]}\n\n"
-                        f"可用来源：\n{source_context[:4000]}"
-                    )
-                ),
-            ]
-            gap_messages = _apply_agent_system_prompt(
-                gap_messages,
-                config,
-            )
-            research_budget, gap_call_allowed = _research_budget_allows_call(
-                research_budget,
-                gap_messages,
-            )
-            if gap_call_allowed:
-                try:
-                    gap_llm = ModelFactory.for_task(
-                        "gap_analysis",
-                        temperature=0.0,
-                        config=config,
-                    )
-                    gap_response = gap_llm.invoke(
-                        gap_messages,
-                        config=config,
-                    )
-                    research_budget = _record_research_model_usage(
-                        research_budget,
-                        gap_messages,
-                        gap_response,
-                    )
-                    artifacts = _store_research_budget(
-                        artifacts,
-                        research_budget,
-                        mode=budget_mode,
-                    )
-                    parsed_gap = _parse_json_object(
-                        _extract_response_text(gap_response)
-                    )
-                    gap_value = parsed_gap.get(
-                        "knowledge_gap_analysis",
-                        parsed_gap,
-                    )
-                except Exception as exc:
-                    logging.getLogger(__name__).warning(
-                        "独立知识缺口分析失败，使用评估结果作为降级：%s",
-                        exc,
-                    )
-            else:
-                logging.getLogger(__name__).info(
-                    "研究预算不足，跳过独立知识缺口分析：%s",
-                    research_budget.get("stop_reason", "token_budget_exceeded"),
-                )
-
             knowledge_gap_analysis = normalize_knowledge_gap_analysis(
                 gap_value,
                 coverage_threshold=float(
@@ -3255,52 +3558,37 @@ def evaluator_node(
             verdict = "revise"
 
         claim_payloads: list[dict[str, Any]] = []
-        verifier_agent_result: dict[str, Any] = {
-            "task_id": f"verifier-{state.get('thread_id') or 'session'}-{state.get('deepsearch_epoch', 1)}",
-            "status": "empty",
-            "claims": [],
-            "verified_count": 0,
-            "unsupported_count": 0,
-            "contradicted_count": 0,
-            "tools_used": [],
-            "error": "",
-            "elapsed_seconds": 0.0,
-        }
+        expected_verifier_task_id = (
+            f"verifier-{state.get('thread_id') or 'session'}-"
+            f"{max(int(state.get('deepsearch_epoch', 1) or 1), 1)}"
+        )
+        existing_verifier_result = state.get("verifier_agent_result")
+        has_current_verifier_result = (
+            isinstance(existing_verifier_result, Mapping)
+            and existing_verifier_result.get("task_id") == expected_verifier_task_id
+        )
+        verifier_agent_result = (
+            dict(existing_verifier_result)
+            if has_current_verifier_result
+            else {}
+        )
+        if not has_current_verifier_result:
+            verifier_agent_result = {
+                "task_id": expected_verifier_task_id,
+                "status": "empty",
+                "claims": [],
+                "verified_count": 0,
+                "unsupported_count": 0,
+                "contradicted_count": 0,
+                "tools_used": [],
+                "error": "",
+                "elapsed_seconds": 0.0,
+            }
         contradicted_count = 0
         unsupported_count = 0
         if state.get("route") == "deep":
-            scraped_content = list(state.get("scraped_content") or [])
-            search_results = list(state.get("search_results") or [])
-            if not scraped_content and search_results:
-                scraped_content = [{"results": search_results}]
-
-            verifier = ClaimVerifier(
-                min_overlap_tokens=int(
-                    getattr(
-                        settings,
-                        "deepsearch_claim_verifier_min_overlap_tokens",
-                        2,
-                    )
-                ),
-                max_evidence_per_claim=int(
-                    getattr(
-                        settings,
-                        "deepsearch_claim_verifier_max_evidence_per_claim",
-                        3,
-                    )
-                ),
-            )
-            verifier_task = VerifierTask(
-                task_id=f"verifier-{state.get('thread_id') or 'session'}-{state.get('deepsearch_epoch', 1)}",
-                report=report,
-                scraped_content=scraped_content,
-                passages=(
-                    list(state.get("passages") or [])
-                    if bool(getattr(settings, "deepsearch_claim_verifier_use_passages", True))
-                    else []
-                ),
-            )
-            verifier_agent_result = VerifierAgent(verifier).run(verifier_task).model_dump(mode="json")
+            if not has_current_verifier_result:
+                verifier_agent_result = verifier_agent_node(state, config)["verifier_agent_result"]
             claim_payloads = list(verifier_agent_result["claims"])
             contradicted_count = int(verifier_agent_result["contradicted_count"])
             unsupported_count = int(verifier_agent_result["unsupported_count"])
@@ -3472,18 +3760,73 @@ def evaluator_node(
         )
         return {
             "evaluation": (
-                "自动评估失败，本轮暂不阻断报告。"
+                "自动评估失败；报告未通过评估，不会作为已验证结果返回。"
             ),
-            "verdict": "pass",
+            "verdict": "evaluation_failed",
             "eval_dimensions": {},
             "missing_topics": [],
             "knowledge_gap_analysis": None,
             "deepsearch_artifacts": artifacts,
             **budget_state_fields(research_budget),
             "errors": [error_message],
+            "last_error": error_message,
             "current_step": 4,
             "status": "running",
         }
+
+
+def evaluator_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Dict[str, Any]:
+    epoch = max(int(state.get("deepsearch_epoch", 1) or 1), 1)
+    revision = max(int(state.get("revision_count", 0) or 0), 0)
+    task = EvaluatorTask(
+        task_id=(
+            f"evaluator-{state.get('thread_id') or 'session'}-"
+            f"{epoch}-{revision}"
+        ),
+        question=str(state.get("input", "") or "")[:4000],
+        report=str(state.get("draft_report") or state.get("final_report") or "")[:50000],
+        evidence_count=len(state.get("search_results") or []),
+    )
+    allowed_state_keys = {
+        "input",
+        "draft_report",
+        "final_report",
+        "route",
+        "deepsearch_mode",
+        "deepsearch_artifacts",
+        "quality_summary",
+        "sources",
+        "search_results",
+        "images",
+        "deepsearch_epoch",
+        "deepsearch_max_epochs",
+        "deepsearch_query_history",
+        "verifier_agent_result",
+        "scraped_content",
+        "passages",
+        "revision_count",
+        "max_revisions",
+        "missing_topics",
+    }
+    evaluator_state = {
+        key: state[key]
+        for key in allowed_state_keys
+        if key in state
+    }
+    evaluator = EvaluatorAgent(
+        lambda _task: _evaluate_report_node(evaluator_state, config)
+    )
+    agent_result, output = evaluator.run(task)
+    output = dict(output)
+    output["evaluator_agent_result"] = agent_result.model_dump(mode="json")
+    artifacts = dict(state.get("deepsearch_artifacts") or {})
+    artifacts.update(output.get("deepsearch_artifacts") or {})
+    artifacts["evaluator_agent"] = output["evaluator_agent_result"]
+    output["deepsearch_artifacts"] = artifacts
+    return output
 
 
 
@@ -3603,6 +3946,47 @@ def revise_node(
         config,
     )
 
+    max_tokens = max(int(research_budget.get("max_tokens", 0) or 0), 0)
+    reevaluation_reserve = (
+        min(1024, max(512, int(max_tokens * 0.1)))
+        if state.get("route") == "deep" and max_tokens >= 4096
+        else 0
+    )
+    if state.get("route") == "deep":
+        research_budget, can_call_revision = _research_budget_allows_call(
+            research_budget,
+            messages,
+            reserve_tokens=reevaluation_reserve,
+        )
+        remaining_output_tokens = (
+            max_tokens
+            - int(research_budget.get("tokens_used", 0) or 0)
+            - estimate_tokens(messages)
+            - reevaluation_reserve
+        )
+        if not can_call_revision or remaining_output_tokens <= 0:
+            if not research_budget.get("stop_reason"):
+                research_budget["stop_reason"] = "token_budget_exceeded"
+            artifacts = _store_research_budget(
+                state.get("deepsearch_artifacts"),
+                research_budget,
+                mode=budget_mode,
+            )
+            return {
+                "revision_agent_result": {
+                    "task_id": f"reviser-{state.get('thread_id') or 'session'}-{revision_count}",
+                    "status": "skipped",
+                    "error": "剩余预算不足以修订并保留复评额度。",
+                },
+                "revision_count": max(int(state.get("revision_count", 0) or 0), 0),
+                "deepsearch_artifacts": artifacts,
+                **budget_state_fields(research_budget),
+                "status": "running",
+            }
+        bind = getattr(llm, "bind", None)
+        if callable(bind):
+            llm = bind(max_tokens=min(1024, remaining_output_tokens))
+
     response = llm.invoke(
         messages,
         config=config,
@@ -3611,6 +3995,7 @@ def revise_node(
         research_budget,
         messages,
         response,
+        stage="revision",
     )
 
     revised_report = _extract_response_text(

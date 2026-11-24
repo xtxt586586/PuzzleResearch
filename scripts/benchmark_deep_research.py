@@ -125,6 +125,7 @@ async def _execute_research_case(
     api_key: str = "",
     transport: Any = None,
     expected_fields: list[str] | None = None,
+    hierarchical_agents: bool | None = None,
 ) -> dict[str, Any]:
     """Run one deep research request and collect its final evidence metrics."""
     import httpx
@@ -140,9 +141,14 @@ async def _execute_research_case(
     error_message: str | None = None
     last_quality_update: dict[str, Any] | None = None
     cancelled = False
+    stream_done = False
     app_module = None
     previous_mode: Any = None
+    previous_hierarchical_agents: Any = None
+    previous_graph: Any = None
     restore_mode = False
+    restore_hierarchical_agents = False
+    restore_graph = False
 
     normalized_base_url = str(base_url or "").strip()
     if normalized_base_url.lower() == "asgi":
@@ -159,8 +165,49 @@ async def _execute_research_case(
                 restore_mode = True
             except (AttributeError, TypeError, ValueError):
                 restore_mode = False
+        if hierarchical_agents is not None:
+            if backend_settings is None or not hasattr(backend_settings, "use_hierarchical_agents"):
+                if restore_mode:
+                    backend_settings.deepsearch_mode = previous_mode
+                return {"status": "failed", "error": "ASGI 后端不支持切换分层 Agent 配置。"}
+            try:
+                previous_hierarchical_agents = backend_settings.use_hierarchical_agents
+                backend_settings.use_hierarchical_agents = bool(hierarchical_agents)
+                restore_hierarchical_agents = True
+            except (AttributeError, TypeError, ValueError):
+                if restore_mode:
+                    backend_settings.deepsearch_mode = previous_mode
+                return {"status": "failed", "error": "无法切换 use_hierarchical_agents 配置。"}
+            runtime = getattr(app_module, "chat_runtime", None)
+            if runtime is None or not hasattr(runtime, "graph"):
+                if restore_mode:
+                    backend_settings.deepsearch_mode = previous_mode
+                backend_settings.use_hierarchical_agents = previous_hierarchical_agents
+                return {"status": "failed", "error": "ASGI 后端无法重新编译 Agent 工作流。"}
+            try:
+                from agent.core.graph import create_research_graph
+
+                previous_graph = runtime.graph
+                runtime.graph = create_research_graph(
+                    checkpointer=getattr(runtime, "_checkpointer", None),
+                    store=getattr(runtime, "_store", None),
+                )
+                restore_graph = True
+            except Exception as exc:
+                if restore_mode:
+                    backend_settings.deepsearch_mode = previous_mode
+                backend_settings.use_hierarchical_agents = previous_hierarchical_agents
+                return {
+                    "status": "failed",
+                    "error": f"ASGI Agent 工作流重编译失败：{type(exc).__name__}。",
+                }
     elif not normalized_base_url.startswith(("http://", "https://")):
         return {"status": "failed", "error": "base_url 必须是 http(s) 地址或 asgi。"}
+    elif hierarchical_agents is not None:
+        return {
+            "status": "failed",
+            "error": "远程后端无法由基准脚本切换 use_hierarchical_agents；请在服务端配置后再执行。",
+        }
 
     headers = {"Accept": "text/event-stream"}
     if api_key:
@@ -168,7 +215,7 @@ async def _execute_research_case(
 
     async def consume_response(client: Any) -> None:
         nonlocal thread_id, final_report, error_message, last_quality_update, cancelled
-        nonlocal first_token_ms
+        nonlocal first_token_ms, stream_done
         payload: dict[str, Any] = {
             "query": query,
             "search_mode": {
@@ -216,6 +263,7 @@ async def _execute_research_case(
                     cancelled = True
                     break
                 elif event_name == "done":
+                    stream_done = True
                     break
 
     client_options: dict[str, Any] = {
@@ -256,17 +304,22 @@ async def _execute_research_case(
                 status = "failed"
             elif cancelled:
                 status = "cancelled"
+            elif not stream_done or not final_report.strip():
+                status = "failed"
+                error_message = "流未正常结束或未返回报告。"
             else:
                 status = "completed"
 
             run_metrics = None
             evidence_summary = None
             model_call_count = None
+            trace_summary = None
             if thread_id:
                 try:
                     metrics_response = await client.get(f"/api/runs/{thread_id}")
                     if metrics_response.status_code == 200:
                         run_metrics = metrics_response.json()
+                        model_call_count = _maybe_float(run_metrics.get("model_call_count"))
                         evidence = run_metrics.get("evidence_summary")
                         if isinstance(evidence, dict):
                             evidence_summary = evidence
@@ -284,17 +337,30 @@ async def _execute_research_case(
                                 None,
                             )
                             if run is not None:
-                                model_call_count = _maybe_float(
-                                    run.get("model_call_count")
-                                )
+                                model_call_count = model_call_count if model_call_count is not None else _maybe_float(run.get("model_call_count"))
+                    trace_response = await client.get(f"/api/traces/{thread_id}/summary")
+                    if trace_response.status_code == 200:
+                        raw_trace = trace_response.json()
+                        if isinstance(raw_trace, dict):
+                            trace_summary = raw_trace
                 except (httpx.HTTPError, ValueError):
                     pass
+
+            client_first_text_ms = first_token_ms
+            backend_first_token_ms = (
+                _maybe_float(run_metrics.get("first_token_ms"))
+                if isinstance(run_metrics, dict)
+                else None
+            )
+            if backend_first_token_ms is not None:
+                first_token_ms = backend_first_token_ms
 
             return {
                 "status": status,
                 "thread_id": thread_id,
                 "duration_ms": duration_ms,
                 "first_token_ms": first_token_ms,
+                "client_first_text_ms": client_first_text_ms,
                 "final_report_chars": len(final_report),
                 "final_report_preview": final_report[:600],
                 "expected_field_coverage": _expected_field_coverage(
@@ -305,6 +371,7 @@ async def _execute_research_case(
                 "error": error_message,
                 "last_quality_update": last_quality_update,
                 "run_metrics": run_metrics,
+                "trace_summary": trace_summary,
                 "evidence_summary": evidence_summary,
             }
     except Exception as exc:
@@ -316,8 +383,12 @@ async def _execute_research_case(
             "error": f"请求失败：{type(exc).__name__}。",
         }
     finally:
+        if restore_graph and app_module is not None:
+            app_module.chat_runtime.graph = previous_graph
         if restore_mode and app_module is not None:
             app_module.settings.deepsearch_mode = previous_mode
+        if restore_hierarchical_agents and app_module is not None:
+            app_module.settings.use_hierarchical_agents = previous_hierarchical_agents
 
 
 def _maybe_float(value: Any) -> float | None:
@@ -513,6 +584,7 @@ def run_benchmark(
     timeout_s: float = 180.0,
     min_citation_coverage: float = 0.6,
     api_key_env: str = "PUZZLERESEARCH_API_KEY",
+    hierarchical_agents: bool | None = None,
 ) -> dict[str, Any]:
     report = build_benchmark_report(
         max_cases=max_cases,
@@ -527,6 +599,8 @@ def run_benchmark(
             raise ValueError("timeout_s 必须大于 0。")
         if not 0.0 <= min_citation_coverage <= 1.0:
             raise ValueError("min_citation_coverage 必须在 0 到 1 之间。")
+        if hierarchical_agents is not None and str(base_url).strip().lower() != "asgi":
+            raise ValueError("对照分层 Agent 必须使用 base_url=asgi；远程服务配置不能由本进程切换。")
 
         api_key = os.environ.get(api_key_env, "").strip() if api_key_env else ""
         evidence_summaries: list[dict[str, Any]] = []
@@ -541,6 +615,7 @@ def run_benchmark(
                     timeout_s=timeout_s,
                     api_key=api_key,
                     expected_fields=case.get("expected_fields", []),
+                    hierarchical_agents=hierarchical_agents,
                 )
             )
             case["execution"] = result
@@ -623,6 +698,14 @@ def run_benchmark(
                 "benchmark process"
                 if str(base_url).strip().lower() == "asgi"
                 else "remote backend configuration"
+            ),
+            "hierarchical_agents": hierarchical_agents,
+            "hierarchical_agents_applied_by": (
+                "benchmark process"
+                if str(base_url).strip().lower() == "asgi" and hierarchical_agents is not None
+                else "remote backend configuration"
+                if hierarchical_agents is not None
+                else "unchanged"
             ),
         })
         report["summary"].update({
@@ -719,6 +802,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default="")
     parser.add_argument("--timeout-s", type=float, default=180.0)
+    parser.add_argument(
+        "--hierarchical-agents",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="ASGI 基准中显式切换 use_hierarchical_agents（--no-hierarchical-agents 为线性基线）。",
+    )
     parser.add_argument("--min-citation-coverage", type=float, default=0.6)
     parser.add_argument(
         "--api-key-env",
@@ -745,6 +834,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_s=args.timeout_s,
             min_citation_coverage=args.min_citation_coverage,
             api_key_env=args.api_key_env,
+            hierarchical_agents=args.hierarchical_agents,
         )
     except (OSError, ValueError) as exc:
         print(f"基准报告生成失败：{exc}", file=sys.stderr)

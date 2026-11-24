@@ -1,6 +1,8 @@
 import json
+import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -174,6 +176,28 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertEqual(report["metrics"]["avg_citation_coverage"], 0.9)
         self.assertEqual(report["metrics"]["unsupported_claims_total"], 4)
 
+    def test_run_benchmark_records_local_agent_mode_switch(self):
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.benchmark_deep_research._execute_research_case",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "completed",
+                "evidence_summary": {},
+            },
+        ) as execute_case:
+            report = run_benchmark(
+                output=Path(directory) / "hierarchical.json",
+                max_cases=1,
+                bench_file=ROOT / "eval" / "benchmarks" / "sample_tasks.jsonl",
+                execute=True,
+                base_url="asgi",
+                hierarchical_agents=True,
+            )
+
+        self.assertTrue(report["hierarchical_agents"])
+        self.assertEqual(report["hierarchical_agents_applied_by"], "benchmark process")
+        self.assertTrue(execute_case.await_args.kwargs["hierarchical_agents"])
+
     def test_execution_with_empty_evidence_does_not_claim_metrics_available(self):
         with tempfile.TemporaryDirectory() as directory, patch(
             "scripts.benchmark_deep_research._execute_research_case",
@@ -194,6 +218,18 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertFalse(report["metrics"]["available"])
         self.assertIsNone(report["metrics"]["avg_citation_coverage"])
         self.assertEqual(report["summary"]["quality_passed_cases"], 0)
+
+    def test_agent_mode_comparison_rejects_remote_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "base_url=asgi"):
+                run_benchmark(
+                    output=Path(directory) / "remote.json",
+                    max_cases=1,
+                    bench_file=ROOT / "eval" / "benchmarks" / "sample_tasks.jsonl",
+                    execute=True,
+                    base_url="https://benchmark.invalid",
+                    hierarchical_agents=False,
+                )
 
     def test_latency_percentiles_use_completed_samples(self):
         self.assertEqual(_percentile([300, 100, 200], 50), 200)
@@ -234,6 +270,56 @@ class BenchmarkReportTests(unittest.TestCase):
 
 
 class BenchmarkExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_asgi_agent_mode_is_applied_during_request_and_restored(self):
+        fake_settings = SimpleNamespace(
+            deepsearch_mode="linear",
+            use_hierarchical_agents=False,
+        )
+        original_graph = object()
+        rebuilt_graph = object()
+        fake_runtime = SimpleNamespace(
+            graph=original_graph,
+            _checkpointer=None,
+            _store=None,
+        )
+        fake_main = SimpleNamespace(
+            app=object(),
+            settings=fake_settings,
+            chat_runtime=fake_runtime,
+            _active_api_key=lambda: "",
+        )
+        observed_modes = []
+
+        def handler(request):
+            observed_modes.append(fake_settings.use_hierarchical_agents)
+            self.assertIs(fake_runtime.graph, rebuilt_graph)
+            return httpx.Response(200, text='event: completion\ndata: {"content":"完成"}\n\nevent: done\ndata: {}\n\n')
+
+        with (
+            patch.dict(sys.modules, {"main": fake_main}),
+            patch(
+                "agent.core.graph.create_research_graph",
+                return_value=rebuilt_graph,
+            ) as create_graph,
+        ):
+            result = await _execute_research_case(
+                "单个基准问题",
+                mode="tree",
+                base_url="asgi",
+                model="",
+                timeout_s=5,
+                transport=httpx.MockTransport(handler),
+                hierarchical_agents=True,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(observed_modes)
+        self.assertTrue(all(observed_modes))
+        create_graph.assert_called_once_with(checkpointer=None, store=None)
+        self.assertIs(fake_runtime.graph, original_graph)
+        self.assertFalse(fake_settings.use_hierarchical_agents)
+        self.assertEqual(fake_settings.deepsearch_mode, "linear")
+
     async def test_sse_parser_unwraps_envelopes_and_ignores_comments(self):
         self.assertEqual(
             _parse_sse_frame(
@@ -286,10 +372,13 @@ data: {"type":"done","data":{}}
                     200,
                     json={"runs": [{"run_id": "thread-mock-001", "model_call_count": 3}]},
                 )
+            if request.url.path == "/api/traces/thread-mock-001/summary":
+                return httpx.Response(200, json={"total_llm_calls": 3})
             self.assertEqual(request.url.path, "/api/runs/thread-mock-001")
             return httpx.Response(
                 200,
                 json={
+                    "first_token_ms": 2100,
                     "evidence_summary": {
                         "citation_coverage": 0.9,
                         "query_coverage_score": 0.8,
@@ -315,10 +404,13 @@ data: {"type":"done","data":{}}
         self.assertEqual(result["final_report_preview"], "最终研究报告")
         self.assertEqual(result["last_quality_update"], {"score": 0.8})
         self.assertIsNotNone(result["first_token_ms"])
+        self.assertEqual(result["first_token_ms"], 2100)
+        self.assertIsNotNone(result["client_first_text_ms"])
         self.assertEqual(result["evidence_summary"]["citation_coverage"], 0.9)
         self.assertEqual(result["model_call_count"], 3)
         self.assertEqual(result["expected_field_coverage"], 0.5)
-        self.assertEqual(len(requests), 3)
+        self.assertEqual(result["trace_summary"]["total_llm_calls"], 3)
+        self.assertEqual(len(requests), 4)
         self.assertTrue(all(request.headers["authorization"] == "Bearer service-key" for request in requests))
 
     async def test_execute_case_returns_http_error_without_metrics_fetch(self):
@@ -340,6 +432,17 @@ data: {"type":"done","data":{}}
         self.assertEqual(result["status"], "failed")
         self.assertIn("503", result["error"])
         self.assertEqual(len(requests), 1)
+
+    async def test_truncated_stream_is_not_counted_as_completed(self):
+        def handler(request):
+            return httpx.Response(200, text='event: text\ndata: {"content":"部分报告"}\n\n')
+
+        result = await _execute_research_case(
+            "研究主题", mode="auto", base_url="https://benchmark.invalid",
+            model="", timeout_s=5, transport=httpx.MockTransport(handler),
+        )
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("流未正常结束", result["error"])
 
 
 if __name__ == "__main__":

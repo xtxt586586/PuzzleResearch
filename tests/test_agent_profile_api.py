@@ -47,6 +47,7 @@ class AgentProfileApiTests(unittest.TestCase):
                         "tool_call_limit": 1,
                         "require_tool_approval": True,
                         "tool_retry_limit": 2,
+                        "browser_context_helper": True,
                     }
                 },
             },
@@ -121,6 +122,7 @@ class AgentProfileApiTests(unittest.TestCase):
             profile.tool_retry_limit,
             2,
         )
+        self.assertTrue(profile.browser_context_helper)
 
         self.assertEqual(
             runtime_config["configurable"]["model"],

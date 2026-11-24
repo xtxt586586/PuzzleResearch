@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -121,9 +122,51 @@ class ScreenshotStore:
             extension,
         )
         path = self.root / filename
+        metadata_path = path.with_name(
+            f"{path.name}.json"
+        )
+        metadata_temp_path = path.with_name(
+            f"{path.name}.json.tmp"
+        )
+        saved_at = datetime.now(timezone.utc).isoformat()
+        screenshot_metadata = dict(metadata or {})
+        normalized_page_url = (
+            str(
+                page_url
+                or screenshot_metadata.get("url")
+                or ""
+            ).strip()[:4096]
+            or None
+        )
+        normalized_title = (
+            str(screenshot_metadata.get("title") or "").strip()[:1000]
+            or None
+        )
+        metadata_record = {
+            "filename": filename,
+            "thread_id": thread_id,
+            "action": action,
+            "page_url": normalized_page_url,
+            "title": normalized_title,
+            "timestamp": saved_at,
+        }
+        serialized_metadata = json.dumps(
+            metadata_record,
+            ensure_ascii=False,
+            default=str,
+        )
 
         with self._lock:
             path.write_bytes(image_data)
+            try:
+                metadata_temp_path.write_text(
+                    serialized_metadata,
+                    encoding="utf-8",
+                )
+                metadata_temp_path.replace(metadata_path)
+            except Exception:
+                metadata_temp_path.unlink(missing_ok=True)
+                raise
 
         return {
             "url": f"{self.base_url}/{filename}",
@@ -131,13 +174,11 @@ class ScreenshotStore:
             "path": str(path),
             "action": action,
             "thread_id": thread_id,
-            "page_url": page_url,
+            "page_url": normalized_page_url,
             "mime_type": mime_type,
-            "timestamp": datetime.now(
-                timezone.utc
-            ).isoformat(),
+            "timestamp": saved_at,
             "size_bytes": len(image_data),
-            "metadata": dict(metadata or {}),
+            "metadata": screenshot_metadata,
         }
 
     def save_base64(
@@ -210,6 +251,11 @@ class ScreenshotStore:
             1,
         )
         result = []
+        thread_prefix = (
+            f"{self._safe_part(thread_id, 'thread')}_"
+            if thread_id
+            else None
+        )
 
         files = sorted(
             (
@@ -224,13 +270,40 @@ class ScreenshotStore:
         )
 
         for path in files:
-            if (
-                thread_id
-                and thread_id not in path.name
-            ):
-                continue
-
             suffix = path.suffix.lower()
+            metadata_path = path.with_name(
+                f"{path.name}.json"
+            )
+            metadata_record: dict[str, Any] = {}
+            try:
+                loaded_metadata = json.loads(
+                    metadata_path.read_text(encoding="utf-8")
+                )
+                if isinstance(loaded_metadata, dict):
+                    metadata_record = loaded_metadata
+            except (OSError, json.JSONDecodeError):
+                pass
+
+            if thread_id:
+                if "thread_id" in metadata_record:
+                    if metadata_record.get("thread_id") != thread_id:
+                        continue
+                elif not path.name.startswith(thread_prefix or ""):
+                    continue
+
+            action = None
+            stored_action = metadata_record.get("action")
+            if isinstance(stored_action, str) and stored_action:
+                action = stored_action
+            elif thread_prefix and path.name.startswith(thread_prefix):
+                remainder = path.stem[len(thread_prefix):]
+                match = re.match(
+                    r"(?P<action>.+)_\d{8}_\d{6}_\d{6}_[a-f0-9]{8}$",
+                    remainder,
+                )
+                if match:
+                    action = match.group("action")
+
             result.append(
                 {
                     "url": (
@@ -238,13 +311,17 @@ class ScreenshotStore:
                         f"{path.name}"
                     ),
                     "filename": path.name,
+                    "action": action,
+                    "page_url": metadata_record.get("page_url"),
+                    "title": metadata_record.get("title"),
                     "mime_type": (
                         "image/png"
                         if suffix == ".png"
                         else "image/jpeg"
                     ),
                     "size_bytes": path.stat().st_size,
-                    "created_at": datetime.fromtimestamp(
+                    "created_at": metadata_record.get("timestamp")
+                    or datetime.fromtimestamp(
                         path.stat().st_mtime,
                         timezone.utc,
                     ).isoformat(),
@@ -279,6 +356,9 @@ class ScreenshotStore:
 
             if modified < cutoff:
                 path.unlink()
+                path.with_name(
+                    f"{path.name}.json"
+                ).unlink(missing_ok=True)
                 deleted += 1
 
         return deleted

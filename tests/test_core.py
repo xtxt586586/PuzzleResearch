@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -12,6 +12,7 @@ from agent.core.graph import (
 )
 from agent.core.smart_router import SmartRouter
 from agent.core.state import capped_add_messages, merge_unique_items
+from agent.core.middleware import clear_tool_results_for_context
 from agent.workflows.nodes import (
     _parse_json_object,
     _parse_plan_response,
@@ -23,6 +24,70 @@ from common.config import settings
 
 
 class CoreContractTests(unittest.TestCase):
+    def test_context_edit_clears_old_tool_outputs_but_keeps_recent_and_inputs(self):
+        results = [
+            {
+                "tool_name": f"tool-{index}",
+                "arguments": {"query": f"query-{index}"},
+                "result": "x" * 100,
+            }
+            for index in range(4)
+        ]
+
+        with patch.object(settings, "context_edit_trigger_tokens", 1), patch.object(
+            settings, "context_edit_keep_tools", 2
+        ):
+            edited = clear_tool_results_for_context(results)
+
+        self.assertEqual(edited[0]["result"], "[cleared]")
+        self.assertEqual(edited[1]["result"], "[cleared]")
+        self.assertEqual(edited[2]["result"], results[2]["result"])
+        self.assertEqual(edited[3]["result"], results[3]["result"])
+        self.assertEqual(edited[0]["arguments"], results[0]["arguments"])
+        self.assertEqual(results[0]["result"], "x" * 100)
+
+    def test_context_edit_does_not_clear_when_under_token_threshold(self):
+        results = [{"tool_name": "echo", "result": "small"}]
+
+        with patch.object(settings, "context_edit_trigger_tokens", 100), patch.object(
+            settings, "context_edit_keep_tools", 0
+        ):
+            edited = clear_tool_results_for_context(results)
+
+        self.assertEqual(edited, results)
+
+    def test_message_reducer_preserves_tool_messages_by_default(self):
+        messages = [
+            HumanMessage(content="运行代码"),
+            ToolMessage(content="执行结果", tool_call_id="call-001"),
+        ]
+        with patch.object(settings, "strip_tool_messages", False):
+            merged = capped_add_messages([], messages)
+
+        self.assertEqual(len(merged), 2)
+        self.assertIsInstance(merged[1], ToolMessage)
+
+    def test_message_reducer_strips_tool_messages_before_trim_check(self):
+        messages = [
+            HumanMessage(content="运行代码"),
+            ToolMessage(content="执行结果", tool_call_id="call-001"),
+            AIMessage(content="结果是 5"),
+        ]
+        with patch.object(settings, "strip_tool_messages", True), patch.object(
+            settings, "trim_messages", False
+        ):
+            merged = capped_add_messages([], messages)
+
+        self.assertEqual(
+            [message.content for message in merged],
+            ["运行代码", "结果是 5"],
+        )
+
+    def test_tool_message_middleware_is_exported_from_agent_core(self):
+        from agent.core import maybe_strip_tool_messages
+
+        self.assertTrue(callable(maybe_strip_tool_messages))
+
     def test_message_reducer_keeps_head_and_tail(self):
         with patch.object(settings, "trim_messages", True), patch.object(
             settings, "trim_messages_keep_first", 1
@@ -40,6 +105,85 @@ class CoreContractTests(unittest.TestCase):
             [message.content for message in merged],
             ["system", "middle", "latest"],
         )
+
+    def test_message_reducer_summarizes_middle_history_at_threshold(self):
+        class FakeModel:
+            def invoke(self, messages):
+                return AIMessage(content="压缩后的旧对话")
+
+        source = [HumanMessage(content=f"消息{i}") for i in range(7)]
+        with patch.object(settings, "trim_messages", True), patch.object(
+            settings, "trim_messages_keep_first", 1
+        ), patch.object(settings, "trim_messages_keep_last", 2), patch.object(
+            settings, "summary_messages", True
+        ), patch.object(settings, "summary_messages_trigger", 5), patch(
+            "agent.core.message_utils.ModelFactory.create", return_value=FakeModel()
+        ) as create_model:
+            merged = capped_add_messages([], source)
+
+        self.assertEqual(len(merged), 4)
+        self.assertEqual(merged[0].content, "消息0")
+        self.assertEqual(merged[-2].content, "消息5")
+        self.assertEqual(merged[-1].content, "消息6")
+        self.assertIn("压缩后的旧对话", merged[1].content)
+        create_model.assert_called_once()
+
+    def test_message_reducer_carries_previous_summary_into_next_compaction(self):
+        prompts = []
+
+        class FakeModel:
+            def invoke(self, messages):
+                prompts.append(messages[1].content)
+                return AIMessage(content=f"第{len(prompts)}次摘要")
+
+        initial = [HumanMessage(content=f"旧消息{i}") for i in range(7)]
+        additions = [HumanMessage(content=f"新消息{i}") for i in range(5)]
+        with patch.object(settings, "trim_messages", True), patch.object(
+            settings, "trim_messages_keep_first", 1
+        ), patch.object(settings, "trim_messages_keep_last", 2), patch.object(
+            settings, "summary_messages", True
+        ), patch.object(settings, "summary_messages_trigger", 5), patch(
+            "agent.core.message_utils.ModelFactory.create", return_value=FakeModel()
+        ):
+            compacted = capped_add_messages([], initial)
+            compacted = capped_add_messages(compacted, additions)
+
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("第1次摘要", prompts[1])
+        self.assertIn("旧消息5", prompts[1])
+        self.assertEqual(compacted[1].content, "对话历史摘要：\n第2次摘要")
+        self.assertEqual(compacted[-2].content, "新消息3")
+        self.assertEqual(compacted[-1].content, "新消息4")
+
+    def test_message_reducer_keeps_history_until_summary_threshold(self):
+        messages = [HumanMessage(content=f"消息{i}") for i in range(4)]
+        with patch.object(settings, "trim_messages", True), patch.object(
+            settings, "trim_messages_keep_first", 1
+        ), patch.object(settings, "trim_messages_keep_last", 1), patch.object(
+            settings, "summary_messages", True
+        ), patch.object(settings, "summary_messages_trigger", 5), patch(
+            "agent.core.message_utils.ModelFactory.create",
+            side_effect=AssertionError("summary threshold should not be reached"),
+        ):
+            merged = capped_add_messages([], messages)
+
+        self.assertEqual(merged, messages)
+
+    def test_message_reducer_falls_back_when_summary_model_fails(self):
+        messages = [HumanMessage(content=f"消息{i}") for i in range(7)]
+        with patch.object(settings, "trim_messages", True), patch.object(
+            settings, "trim_messages_keep_first", 1
+        ), patch.object(settings, "trim_messages_keep_last", 2), patch.object(
+            settings, "summary_messages", True
+        ), patch.object(settings, "summary_messages_trigger", 5), patch(
+            "agent.core.message_utils.ModelFactory.create",
+            side_effect=RuntimeError("模型不可用"),
+        ):
+            merged = capped_add_messages([], messages)
+
+        self.assertEqual(len(merged), 4)
+        self.assertIn("消息4", merged[1].content)
+        self.assertEqual(merged[-1].content, "消息6")
 
     def test_search_result_reducer_deduplicates_urls(self):
         merged = merge_unique_items(
@@ -82,6 +226,28 @@ class CoreContractTests(unittest.TestCase):
         self.assertIsNone(
             SmartRouter._explicit_decision("什么是 LangGraph")
         )
+
+    def test_router_does_not_repeat_request_after_transient_model_error(self):
+        class TimeoutModel:
+            calls = 0
+
+            def with_structured_output(self, _schema):
+                return self
+
+            def invoke(self, _messages, config=None):
+                self.calls += 1
+                raise TimeoutError("model request timed out")
+
+        model = TimeoutModel()
+        with patch(
+            "agent.core.smart_router.ModelFactory.for_task",
+            return_value=model,
+        ):
+            decision = SmartRouter().route("解释缓存的作用")
+
+        self.assertEqual(model.calls, 1)
+        self.assertEqual(decision.route, "direct")
+        self.assertIn("timed out", decision.reasoning)
 
     def test_plan_and_json_parsers_accept_model_text(self):
         self.assertEqual(
@@ -201,6 +367,200 @@ class CoreContractTests(unittest.TestCase):
             result["tool_results"][0]["result"]["output"].strip(),
             "5",
         )
+
+    def test_graph_executes_xml_batch_in_order_before_replanning(self):
+        from tools.registry import ToolDefinition, ToolRegistry
+
+        execution_order = []
+
+        def record(value: str) -> dict[str, str]:
+            execution_order.append(value)
+            return {"output": value, "error": ""}
+
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="record",
+                    description="记录输入值",
+                    handler=record,
+                ),
+            ]
+        )
+
+        class SequentialPlanningModel:
+            def __init__(self):
+                self.responses = [
+                    (
+                        "<function_calls>"
+                        '<invoke name="record"><parameter name="value">first</parameter></invoke>'
+                        '<invoke name="record"><parameter name="value">second</parameter></invoke>'
+                        "</function_calls>"
+                    ),
+                    '{"action":"finish","final_report":"已按序执行。"}',
+                ]
+                self.calls = 0
+
+            def invoke(self, messages, config=None):
+                content = self.responses[self.calls]
+                self.calls += 1
+                return type("FakeResponse", (), {"content": content})()
+
+        model = SequentialPlanningModel()
+        graph = create_research_graph()
+        with patch.object(settings, "agent_xml_tool_calling", True), patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = graph.invoke(
+                {"input": "依次记录 first 和 second", "messages": []},
+                config={
+                    "configurable": {
+                        "search_mode": "agent",
+                        "tool_registry": registry,
+                    }
+                },
+            )
+
+        self.assertEqual(execution_order, ["first", "second"])
+        self.assertEqual(model.calls, 2)
+        self.assertEqual(
+            [item["arguments"]["value"] for item in result["tool_results"]],
+            ["first", "second"],
+        )
+        self.assertEqual(result["status"], "completed")
+
+    def test_graph_executes_native_tool_call_batch_and_accepts_final_text(self):
+        from tools.registry import ToolDefinition, ToolRegistry
+
+        execution_order = []
+
+        def record(value: str) -> dict[str, str]:
+            execution_order.append(value)
+            return {"output": value, "error": ""}
+
+        registry = ToolRegistry(
+            [ToolDefinition("record", "记录输入值", record)]
+        )
+
+        class NativePlanningModel:
+            def __init__(self):
+                self.responses = [
+                    {
+                        "content": "",
+                        "tool_calls": [
+                            {"name": "record", "args": {"value": "first"}},
+                            {"name": "record", "args": {"value": "second"}},
+                        ],
+                    },
+                    {"content": "两个值都已记录。", "tool_calls": []},
+                ]
+                self.calls = 0
+                self.bound_tool_names = []
+
+            def bind_tools(self, tools):
+                self.bound_tool_names.append(
+                    [item["function"]["name"] for item in tools]
+                )
+                return self
+
+            def invoke(self, messages, config=None):
+                response = self.responses[self.calls]
+                self.calls += 1
+                return response
+
+        model = NativePlanningModel()
+        with patch.object(settings, "agent_xml_tool_calling", False), patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            result = create_research_graph().invoke(
+                {"input": "依次记录 first 和 second", "messages": []},
+                config={
+                    "configurable": {
+                        "search_mode": "agent",
+                        "tool_registry": registry,
+                    }
+                },
+            )
+
+        self.assertEqual(execution_order, ["first", "second"])
+        self.assertEqual(model.calls, 2)
+        self.assertEqual(model.bound_tool_names, [["record"], ["record"]])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["final_report"], "两个值都已记录。")
+
+    def test_graph_requests_approval_for_each_xml_batch_call(self):
+        from tools.registry import ToolDefinition, ToolRegistry
+
+        execution_order = []
+        registry = ToolRegistry(
+            [
+                ToolDefinition(
+                    name="record",
+                    description="记录输入值",
+                    handler=lambda value: (
+                        execution_order.append(value)
+                        or {"output": value, "error": ""}
+                    ),
+                    requires_approval=True,
+                ),
+            ]
+        )
+
+        class SequentialPlanningModel:
+            def __init__(self):
+                self.responses = [
+                    (
+                        "<function_calls>"
+                        '<invoke name="record"><parameter name="value">first</parameter></invoke>'
+                        '<invoke name="record"><parameter name="value">second</parameter></invoke>'
+                        "</function_calls>"
+                    ),
+                    '{"action":"finish","final_report":"已按序执行。"}',
+                ]
+                self.calls = 0
+
+            def invoke(self, messages, config=None):
+                content = self.responses[self.calls]
+                self.calls += 1
+                return type("FakeResponse", (), {"content": content})()
+
+        graph = create_research_graph(checkpointer=InMemorySaver())
+        config = {
+            "configurable": {
+                "thread_id": "xml-batch-approval",
+                "search_mode": "agent",
+                "tool_registry": registry,
+            }
+        }
+        with patch.object(settings, "agent_xml_tool_calling", True), patch.object(
+            settings, "tool_approval", True
+        ), patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=SequentialPlanningModel(),
+        ):
+            paused_once = graph.invoke(
+                {"input": "依次记录 first 和 second", "messages": []},
+                config=config,
+            )
+            self.assertIn("__interrupt__", paused_once)
+            self.assertEqual(paused_once.get("tool_call_count", 0), 0)
+
+            paused_twice = graph.invoke(
+                Command(resume={"approved": True}),
+                config=config,
+            )
+            self.assertIn("__interrupt__", paused_twice)
+            self.assertEqual(paused_twice.get("tool_call_count"), 1)
+            self.assertEqual(execution_order, ["first"])
+
+            completed = graph.invoke(
+                Command(resume={"approved": True}),
+                config=config,
+            )
+
+        self.assertEqual(execution_order, ["first", "second"])
+        self.assertEqual(completed["status"], "completed")
 
     def test_graph_compiles(self):
         graph = create_research_graph()
@@ -439,15 +799,19 @@ class CoreContractTests(unittest.TestCase):
 
 
     def test_graph_preserves_cancelled_request(self):
-        result = create_research_graph().invoke(
-            {
-                "input": "请执行一个任务",
-                "messages": [],
-                "status": "running",
-                "is_cancelled": True,
-                "cancel_token_id": "cancel-001",
-            }
-        )
+        with patch(
+            "agent.core.smart_router.ModelFactory.for_task",
+            side_effect=AssertionError("cancelled requests must skip model routing"),
+        ):
+            result = create_research_graph().invoke(
+                {
+                    "input": "请执行一个任务",
+                    "messages": [],
+                    "status": "running",
+                    "is_cancelled": True,
+                    "cancel_token_id": "cancel-001",
+                }
+            )
 
         self.assertEqual(
             result["status"],

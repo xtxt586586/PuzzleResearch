@@ -28,6 +28,14 @@ class ResearchObservabilityTests(unittest.TestCase):
                 "quality_summary": {
                     "overall_score": 0.85,
                     "citation_coverage": 1.0,
+                    "query_coverage_score": 0.8,
+                    "query_dimensions_covered": ["official", "evidence"],
+                    "query_dimensions_missing": ["risk"],
+                    "freshness_summary": {
+                        "total_results": 5,
+                        "known_count": 4,
+                        "fresh_30_ratio": 0.5,
+                    },
                 },
             },
             "interrupts": [],
@@ -61,6 +69,14 @@ class ResearchObservabilityTests(unittest.TestCase):
         self.assertEqual(
             payload["quality"]["overall_score"],
             0.85,
+        )
+        self.assertEqual(
+            payload["quality"]["query_coverage_score"],
+            0.8,
+        )
+        self.assertEqual(
+            payload["quality"]["freshness_summary"]["known_count"],
+            4,
         )
 
     def test_research_tree_endpoint_enforces_owner(self):

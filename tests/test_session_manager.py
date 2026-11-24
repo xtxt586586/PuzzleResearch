@@ -404,6 +404,74 @@ class SessionManagerTests(unittest.TestCase):
             "checkpoint-002",
         )
 
+    def test_get_state_reads_interrupts_from_snapshot_tasks(self):
+        snapshot = SimpleNamespace(
+            values={"status": "running"},
+            interrupts=(),
+            tasks=[
+                SimpleNamespace(
+                    interrupts=(
+                        SimpleNamespace(
+                            value={
+                                "type": "tool_approval",
+                                "tool_name": "python_executor",
+                            }
+                        ),
+                    ),
+                ),
+            ],
+            config={
+                "configurable": {
+                    "thread_id": "thread-001",
+                    "checkpoint_id": "checkpoint-task-interrupt",
+                }
+            },
+        )
+        self.runtime.get_state.return_value = snapshot
+
+        result = self.manager.get_state("thread-001")
+
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(len(result["interrupts"]), 1)
+        self.assertEqual(
+            result["interrupts"][0]["tool_name"],
+            "python_executor",
+        )
+
+    def test_get_state_recovers_paused_pending_tool_call(self):
+        snapshot = SimpleNamespace(
+            values={
+                "status": "paused",
+                "pending_tool_calls": [
+                    {
+                        "tool_name": "python_executor",
+                        "arguments": {"code": "print(1 + 1)"},
+                    }
+                ],
+            },
+            interrupts=(),
+            tasks=(),
+            config={
+                "configurable": {
+                    "thread_id": "thread-001",
+                    "checkpoint_id": "checkpoint-paused-tool",
+                }
+            },
+        )
+        self.runtime.get_state.return_value = snapshot
+
+        result = self.manager.get_state("thread-001")
+
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(
+            result["interrupts"][0]["type"],
+            "tool_approval",
+        )
+        self.assertEqual(
+            result["interrupts"][0]["arguments"],
+            {"code": "print(1 + 1)"},
+        )
+
 
     def test_deepsearch_state_is_extracted(self):
         checkpoint = self.checkpointer.checkpoints[

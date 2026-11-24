@@ -18,6 +18,17 @@ class PythonExecutorTests(unittest.TestCase):
         self.assertEqual(result.return_code, 0)
         self.assertFalse(result.timed_out)
 
+    def test_isolated_runtime_supports_langchain_agents(self):
+        result = self.executor.execute(
+            "from langchain.agents import create_agent\n"
+            "print(create_agent.__name__)",
+            timeout_seconds=10,
+        )
+
+        self.assertEqual(result.output.strip(), "create_agent")
+        self.assertEqual(result.error, "")
+        self.assertEqual(result.return_code, 0)
+
     def test_runtime_error_is_returned(self):
         result = self.executor.execute(
             "raise ValueError('test error')",

@@ -187,7 +187,15 @@ class ApiCompatibilityTests(unittest.TestCase):
             new=AsyncMock(
                 return_value=runtime_result
             ),
-        ) as resume:
+        ) as resume, patch.object(
+            main.chat_runtime,
+            "aget_state",
+            return_value={"values": {"conversation_history": []}},
+        ), patch.object(
+            main.chat_runtime,
+            "aupdate_state",
+            new=AsyncMock(),
+        ) as update_state:
             response = self.client.post(
                 "/api/interrupt/resume",
                 json={
@@ -211,6 +219,114 @@ class ApiCompatibilityTests(unittest.TestCase):
         self.assertTrue(
             resume.await_args.args[0]
         )
+        update_state.assert_awaited_once_with(
+            thread_id="thread-resume-001",
+            values={
+                "conversation_history": [
+                    {"role": "assistant", "content": "恢复完成"},
+                ],
+            },
+        )
+
+    def test_interrupt_resume_normalizes_native_edit_decision(self):
+        edited_action = {
+            "name": "python_executor",
+            "args": {"code": "print(6 * 7)"},
+        }
+        with patch.object(
+            main,
+            "_session_manager_with_owner",
+            return_value={},
+        ), patch.object(
+            main,
+            "_resolve_agent_runtime",
+            return_value=(
+                SimpleNamespace(model=""),
+                AgentProfile(name="test"),
+            ),
+        ), patch.object(
+            main.chat_runtime,
+            "aresume",
+            new=AsyncMock(
+                return_value={
+                    "final_report": "恢复完成",
+                    "status": "completed",
+                }
+            ),
+        ) as resume, patch.object(
+            main.chat_runtime,
+            "aget_state",
+            return_value={"values": {"conversation_history": []}},
+        ), patch.object(
+            main.chat_runtime,
+            "aupdate_state",
+            new=AsyncMock(),
+        ) as update_state:
+            response = self.client.post(
+                "/api/interrupt/resume",
+                json={
+                    "thread_id": "thread-native-edit-001",
+                    "payload": {
+                        "decisions": [
+                            {
+                                "type": "edit",
+                                "edited_action": edited_action,
+                            }
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        resume.assert_awaited_once()
+        self.assertEqual(
+            resume.await_args.args[0],
+            {
+                "type": "edit",
+                "edited_action": edited_action,
+            },
+        )
+        update_state.assert_awaited_once_with(
+            thread_id="thread-native-edit-001",
+            values={
+                "conversation_history": [
+                    {"role": "assistant", "content": "恢复完成"},
+                ],
+            },
+        )
+
+    def test_interrupt_resume_rejects_multiple_native_decisions(self):
+        with patch.object(
+            main,
+            "_session_manager_with_owner",
+            return_value={},
+        ), patch.object(
+            main,
+            "_resolve_agent_runtime",
+            return_value=(
+                SimpleNamespace(model=""),
+                AgentProfile(name="test"),
+            ),
+        ), patch.object(
+            main.chat_runtime,
+            "aresume",
+            new=AsyncMock(),
+        ) as resume:
+            response = self.client.post(
+                "/api/interrupt/resume",
+                json={
+                    "thread_id": "thread-native-edit-batch-001",
+                    "payload": {
+                        "decisions": [
+                            {"type": "approve"},
+                            {"type": "reject"},
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        resume.assert_not_awaited()
 
     def test_interrupt_resume_rejects_blank_thread_id(self):
         response = self.client.post(
@@ -277,6 +393,10 @@ class ApiCompatibilityTests(unittest.TestCase):
         )
         self.assertIn(
             "/api/mcp/config",
+            paths,
+        )
+        self.assertIn(
+            "/api/mcp/diagnose",
             paths,
         )
         self.assertIn(

@@ -9,6 +9,84 @@ from pydantic import BaseModel, ConfigDict, Field
 from agent.workflows.claim_verifier import ClaimCheck, ClaimStatus, ClaimVerifier
 
 
+class EvaluatorTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=128)
+    question: str = Field(min_length=1, max_length=4000)
+    report: str = Field(min_length=1, max_length=50000)
+    evidence_count: int = Field(default=0, ge=0)
+
+
+class EvaluatorAgentResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    status: Literal["completed", "failed"]
+    verdict: str = ""
+    evaluation: str = ""
+    dimensions: dict[str, float] = Field(default_factory=dict)
+    missing_topics: list[str] = Field(default_factory=list)
+    error: str = ""
+    elapsed_seconds: float = Field(default=0.0, ge=0.0)
+
+
+class EvaluatorAgent:
+    """Scores a report against its question and evidence without tool access."""
+
+    allowed_tools: frozenset[str] = frozenset()
+
+    def __init__(self, evaluate: Callable[[EvaluatorTask], dict[str, Any]]) -> None:
+        self._evaluate = evaluate
+
+    def run(self, task: EvaluatorTask) -> tuple[EvaluatorAgentResult, dict[str, Any]]:
+        started = time.monotonic()
+        try:
+            output = self._evaluate(task)
+            if not isinstance(output, dict):
+                raise TypeError("Evaluator must return a state update mapping")
+            result = EvaluatorAgentResult(
+                task_id=task.task_id,
+                status=(
+                    "failed"
+                    if output.get("verdict") == "evaluation_failed"
+                    else "completed"
+                ),
+                verdict=str(output.get("verdict", "")),
+                evaluation=str(output.get("evaluation", ""))[:4000],
+                dimensions=dict(output.get("eval_dimensions") or {}),
+                missing_topics=[
+                    str(item)[:500]
+                    for item in (output.get("missing_topics") or [])
+                    if str(item).strip()
+                ][:20],
+                error=(
+                    str(output.get("last_error", "") or "")[:1000]
+                    if output.get("verdict") == "evaluation_failed"
+                    else ""
+                ),
+                elapsed_seconds=max(0.0, time.monotonic() - started),
+            )
+            return result, output
+        except Exception as exc:
+            return EvaluatorAgentResult(
+                task_id=task.task_id,
+                status="failed",
+                verdict="evaluation_failed",
+                error=str(exc)[:1000],
+                elapsed_seconds=max(0.0, time.monotonic() - started),
+            ), {
+                "evaluation": "评估 Agent 执行失败；报告未通过评估。",
+                "verdict": "evaluation_failed",
+                "eval_dimensions": {},
+                "missing_topics": [],
+                "errors": [f"Evaluator Agent failed: {str(exc)[:1000]}"],
+                "last_error": str(exc)[:1000],
+                "current_step": 4,
+                "status": "running",
+            }
+
+
 class WriterTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

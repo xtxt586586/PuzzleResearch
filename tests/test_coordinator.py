@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import agent.core.graph as research_graph
 from agent.core.graph import create_research_graph
 from agent.workflows.coordinator import (
     coordinator_destination,
@@ -366,6 +367,37 @@ class CoordinatorTests(unittest.TestCase):
             "deep_writer",
         )
 
+    def test_coordinator_preserves_revision_budget_when_decision_call_wont_fit(self):
+        state = self._reviewed_state(
+            deepsearch_artifacts={
+                "research_budget": {
+                    "max_tokens": 10000,
+                    "tokens_used": 8000,
+                    "elapsed_seconds": 10,
+                    "max_seconds": 300,
+                    "stop_reason": "",
+                },
+            },
+        )
+        with patch(
+            "agent.workflows.coordinator.ModelFactory.for_task",
+            side_effect=AssertionError("keep remaining tokens for revision"),
+        ):
+            result = coordinator_node(
+                state,
+                {"configurable": {
+                    "deepsearch_max_tokens": 10000,
+                    "deepsearch_max_seconds": 300,
+                }},
+            )
+
+        self.assertEqual(result["coordinator_action"], "synthesize")
+        self.assertEqual(
+            coordinator_destination({**state, **result}),
+            "revise",
+        )
+        self.assertEqual(result["budget_stop_reason"], "")
+
     def test_exhausted_research_budget_does_not_call_revision_model(self):
         with patch(
             "agent.workflows.coordinator.ModelFactory.for_task",
@@ -557,6 +589,103 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(evaluation_count, 2)
         self.assertEqual(assigned_topics, ["主要方案", "成本缺口"])
         self.assertEqual(result["deepsearch_epoch"], 2)
+        self.assertEqual(result["coordinator_action"], "complete")
+        self.assertEqual(result["status"], "completed")
+
+    def test_hierarchical_graph_completes_revision_verification_and_reevaluation(self):
+        calls = {"evaluation": 0, "verification": 0, "revision": 0}
+
+        def fake_router(state, config=None):
+            return {"route": "deep", "status": "running"}
+
+        def fake_plan(state, config=None):
+            return {
+                "research_plan": ["核心问题"],
+                "deepsearch_epoch": 1,
+                "deepsearch_max_epochs": 1,
+                "revision_count": 0,
+                "max_revisions": 1,
+                "deepsearch_mode": "tree",
+            }
+
+        def fake_tree(state, config=None):
+            task = state["active_research_task"]
+            item = {
+                "query": task["topic"],
+                "title": "研究来源",
+                "url": "https://example.test/research",
+                "snippet": "可核查证据",
+            }
+            return {
+                "search_results": [item],
+                "sources": [{"title": item["title"], "url": item["url"]}],
+                "research_agent_results": [{
+                    "task_id": task["task_id"],
+                    "status": "completed",
+                    "summary": "独立研究完成",
+                    "findings": [item],
+                    "sources": [item["url"]],
+                    "tool_calls": ["web_search"],
+                }],
+                "research_tree": {"topic": task["topic"], "nodes": []},
+                "deepsearch_artifacts": {"phase": "tree_searched"},
+                "deepsearch_mode": "tree",
+            }
+
+        def fake_writer(state, config=None):
+            return {"draft_report": "初稿 [来源1]", "final_report": "初稿 [来源1]"}
+
+        def fake_verifier(state, config=None):
+            calls["verification"] += 1
+            return {"verifier_agent_result": {"status": "completed", "claims": []}}
+
+        def fake_evaluator(state, config=None):
+            calls["evaluation"] += 1
+            if calls["evaluation"] == 1:
+                return {
+                    "verdict": "revise",
+                    "missing_topics": ["补充范围说明"],
+                    "deepsearch_artifacts": {"research_budget": {
+                        "max_tokens": 10000,
+                        "tokens_used": 8000,
+                        "max_seconds": 300,
+                        "elapsed_seconds": 10,
+                        "stop_reason": "",
+                    }},
+                }
+            return {"verdict": "pass", "missing_topics": []}
+
+        def fake_revision(state, config=None):
+            calls["revision"] += 1
+            return {
+                "draft_report": "修订报告 [来源1]",
+                "final_report": "修订报告 [来源1]",
+                "revision_count": int(state.get("revision_count", 0)) + 1,
+            }
+
+        with (
+            patch.object(settings, "use_hierarchical_agents", True),
+            patch.object(settings, "hitl_checkpoints", ""),
+            patch.object(settings, "human_review", False),
+            patch("agent.core.graph.router_node", side_effect=fake_router),
+            patch("agent.core.graph.deep_plan_node", side_effect=fake_plan),
+            patch("agent.core.graph.plan_review_node", return_value={}),
+            patch("agent.core.graph.deep_tree_search_node", side_effect=fake_tree),
+            patch("agent.core.graph.deep_writer_node", side_effect=fake_writer),
+            patch("agent.core.graph.verifier_agent_node", side_effect=fake_verifier),
+            patch("agent.core.graph.evaluator_node", side_effect=fake_evaluator),
+            patch("agent.core.graph.revise_node", side_effect=fake_revision),
+            patch("agent.core.graph.human_review_node", return_value={}),
+        ):
+            result = research_graph.create_research_graph().invoke({
+                "input": "研究主题",
+                "messages": [],
+            })
+
+        self.assertEqual(calls, {"evaluation": 2, "verification": 2, "revision": 1})
+        self.assertEqual(result["verdict"], "pass")
+        self.assertEqual(result["revision_count"], 1)
+        self.assertEqual(result["final_report"], "修订报告 [来源1]")
         self.assertEqual(result["coordinator_action"], "complete")
         self.assertEqual(result["status"], "completed")
 

@@ -1,0 +1,62 @@
+name: puzzleresearch
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: puzzleresearch
+      POSTGRES_USER: puzzleresearch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the project .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U puzzleresearch -d puzzleresearch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis/redis-stack@sha256:5d5154123426693540ea6c1d9e638eae2bf2024879c839db6fcfdd7717e817c7
+    restart: unless-stopped
+    command: ["redis-stack-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      HOST: 0.0.0.0
+      PORT: 9000
+      DATABASE_URL: postgresql://puzzleresearch:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the project .env}@postgres:5432/puzzleresearch
+      REDIS_URL: redis://redis:6379/0
+      MEMORY_STORE_BACKEND: redis
+      MEMORY_STORE_URL: redis://redis:6379/0
+      STORAGE_FALLBACK_TO_MEMORY: "false"
+      DEEPSEARCH_MAX_SECONDS: ${DEEPSEARCH_MAX_SECONDS:-300}
+      DEEPSEARCH_MAX_TOKENS: ${DEEPSEARCH_MAX_TOKENS:-50000}
+    ports:
+      - "127.0.0.1:${PUZZLERESEARCH_API_PORT:-9000}:9000"
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

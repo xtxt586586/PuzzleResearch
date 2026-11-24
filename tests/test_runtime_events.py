@@ -1042,6 +1042,9 @@ class AsyncRuntimeEventStreamTests(
 ):
     async def test_astream_runtime_events_normalizes(self):
         runtime = AgentRuntime()
+        conversation = [
+            {"role": "user", "content": "归档问题"},
+        ]
 
         async def raw_event_stream():
             yield {
@@ -1057,11 +1060,12 @@ class AsyncRuntimeEventStreamTests(
             runtime.graph,
             "astream_events",
             return_value=raw_event_stream(),
-        ):
+        ) as graph_astream_events:
             result = [
                 event
                 async for event in runtime.astream_runtime_events(
                     "异步测试事件",
+                    conversation_history=conversation,
                     thread_id="runtime-event-002",
                 )
             ]
@@ -1079,6 +1083,12 @@ class AsyncRuntimeEventStreamTests(
         self.assertEqual(
             result[-1].event,
             "on_chain_end",
+        )
+        self.assertEqual(
+            graph_astream_events.call_args.args[0][
+                "conversation_history"
+            ],
+            conversation,
         )
 
     async def test_aresume_runtime_events_normalizes(self):

@@ -2,6 +2,7 @@ import unittest
 
 from agent.workflows.knowledge_gap import (
     analyze_research_quality,
+    normalize_knowledge_gap_analysis,
 )
 from agent.workflows.research_tree import (
     ResearchNodeStatus,
@@ -10,6 +11,61 @@ from agent.workflows.research_tree import (
 
 
 class ResearchQualityTests(unittest.TestCase):
+    def test_knowledge_gap_analysis_normalizes_priority_and_coverage(self):
+        result = normalize_knowledge_gap_analysis(
+            {
+                "overall_coverage": 1.2,
+                "confidence": -0.1,
+                "gaps": [
+                    {
+                        "aspect": "市场风险",
+                        "importance": "HIGH",
+                        "reason": "缺少量化证据",
+                    },
+                    {"aspect": " 市场风险 ", "importance": "low"},
+                    {"aspect": "用户案例", "importance": "unknown"},
+                ],
+                "suggested_queries": [
+                    "官方市场风险数据",
+                    "官方市场风险数据",
+                ],
+                "covered_aspects": ["定义", "定义"],
+            },
+            coverage_threshold=0.8,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["overall_coverage"], 1.0)
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertEqual(
+            result["gaps"],
+            [
+                {
+                    "aspect": "市场风险",
+                    "importance": "high",
+                    "reason": "缺少量化证据",
+                },
+                {
+                    "aspect": "用户案例",
+                    "importance": "medium",
+                    "reason": "",
+                },
+            ],
+        )
+        self.assertEqual(result["suggested_queries"], ["官方市场风险数据"])
+        self.assertEqual(result["covered_aspects"], ["定义"])
+        self.assertFalse(result["is_sufficient"])
+
+    def test_knowledge_gap_analysis_accepts_coverage_without_high_priority_gaps(self):
+        result = normalize_knowledge_gap_analysis(
+            {
+                "overall_coverage": 0.85,
+                "gaps": [{"aspect": "未来趋势", "importance": "medium"}],
+            }
+        )
+
+        self.assertTrue(result["is_sufficient"])
+
     def test_tree_records_query_results(self):
         tree = ResearchTree.from_queries(
             "LangGraph",

@@ -10,6 +10,54 @@ from sdk.python.puzzleresearch_sdk import (
 
 
 class PuzzleResearchClientTests(unittest.TestCase):
+    def test_chat_sends_json_payload_and_returns_response(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, "/api/chat")
+            self.assertEqual(
+                json.loads(request.content),
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "你好",
+                        }
+                    ],
+                    "stream": False,
+                },
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg-001",
+                    "content": "你好，我是 PuzzleResearch。",
+                    "timestamp": "2026-09-25T00:00:00Z",
+                },
+                headers={"X-Thread-ID": "thread-chat-001"},
+                request=request,
+            )
+
+        http = httpx.Client(
+            transport=httpx.MockTransport(handler)
+        )
+        client = PuzzleResearchClient(http=http)
+
+        result = client.chat(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "你好",
+                    }
+                ],
+                "stream": False,
+            }
+        )
+
+        self.assertEqual(result["id"], "msg-001")
+        self.assertEqual(client.last_thread_id, "thread-chat-001")
+        client.close()
+
     def test_research_sse_parses_envelopes_and_thread_header(self):
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.path, "/api/research/sse")
@@ -324,6 +372,99 @@ class PuzzleResearchClientTests(unittest.TestCase):
         client.close()
 
 
+    def test_workspace_file_routes_encode_paths_and_preserve_downloads(self):
+        calls: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((request.method, str(request.url)))
+
+            if request.url.path.endswith("/workspace/files/upload"):
+                self.assertIn(
+                    "multipart/form-data",
+                    request.headers["content-type"],
+                )
+                self.assertIn(
+                    "研究报告.md".encode("utf-8"),
+                    request.content,
+                )
+                return httpx.Response(
+                    201,
+                    json={
+                        "thread_id": "thread/one",
+                        "path": "研究报告.md",
+                        "bytes": 6,
+                    },
+                    request=request,
+                )
+
+            if request.method == "GET" and "workspace/files/notes" in str(request.url):
+                return httpx.Response(
+                    200,
+                    content=b"draft",
+                    headers={"content-type": "text/plain"},
+                    request=request,
+                )
+
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "thread_id": "thread/one",
+                        "count": 1,
+                        "files": ["notes/research.txt"],
+                    },
+                    request=request,
+                )
+
+            return httpx.Response(
+                200,
+                json={
+                    "thread_id": "thread/one",
+                    "path": "notes/research.txt",
+                },
+                request=request,
+            )
+
+        http = httpx.Client(
+            transport=httpx.MockTransport(handler)
+        )
+        client = PuzzleResearchClient(
+            base_url="http://example.test",
+            http=http,
+        )
+
+        listed = client.list_workspace_files("thread/one")
+        uploaded = client.upload_workspace_file(
+            "thread/one",
+            "研究报告.md",
+            "草稿".encode("utf-8"),
+            content_type="text/markdown",
+        )
+        downloaded, content_type = client.download_workspace_file(
+            "thread/one",
+            "notes/research draft.txt",
+        )
+        deleted = client.delete_workspace_file(
+            "thread/one",
+            "notes/research draft.txt",
+        )
+
+        self.assertEqual(listed["files"], ["notes/research.txt"])
+        self.assertEqual(uploaded["path"], "研究报告.md")
+        self.assertEqual(downloaded, b"draft")
+        self.assertEqual(content_type, "text/plain")
+        self.assertEqual(deleted["path"], "notes/research.txt")
+        self.assertIn(
+            "/api/sessions/thread%2Fone/workspace/files/notes/research%20draft.txt",
+            calls[2][1],
+        )
+        self.assertIn(
+            "/api/sessions/thread%2Fone/workspace/files/notes/research%20draft.txt",
+            calls[3][1],
+        )
+        client.close()
+
+
     def test_mcp_and_browser_compatibility_methods(self):
         requests: list[tuple[str, str]] = []
 
@@ -358,6 +499,28 @@ class PuzzleResearchClientTests(unittest.TestCase):
                             }
                         },
                         "loaded_tools": 0,
+                    },
+                    request=request,
+                )
+
+            if request.url.path == "/api/mcp/diagnose":
+                return httpx.Response(
+                    200,
+                    json={
+                        "enabled": True,
+                        "status": "degraded",
+                        "ready": False,
+                        "server_count": 1,
+                        "connected_count": 0,
+                        "servers": [
+                            {
+                                "server_id": "demo",
+                                "transport": "sse",
+                                "status": "not_loaded",
+                                "loaded_tools": 0,
+                                "message": "服务器尚未成功加载。",
+                            }
+                        ],
                     },
                     request=request,
                 )
@@ -406,6 +569,17 @@ class PuzzleResearchClientTests(unittest.TestCase):
             0,
         )
 
+        diagnosis = client.diagnose_mcp()
+
+        self.assertEqual(
+            diagnosis["status"],
+            "degraded",
+        )
+        self.assertEqual(
+            diagnosis["servers"][0]["server_id"],
+            "demo",
+        )
+
         diagnosis = client.diagnose_browser()
 
         self.assertTrue(
@@ -422,6 +596,10 @@ class PuzzleResearchClientTests(unittest.TestCase):
                 (
                     "POST",
                     "/api/mcp/config",
+                ),
+                (
+                    "GET",
+                    "/api/mcp/diagnose",
                 ),
                 (
                     "GET",

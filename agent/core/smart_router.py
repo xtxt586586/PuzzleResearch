@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import Field,BaseModel
 
 from agent.core.model_factory import ModelFactory
+from agent.prompts import get_prompt_manager
 
 
 RouteType = Literal[
@@ -147,6 +148,32 @@ class SmartRouter:
         self.fallback_route = fallback_route
 
     @staticmethod
+    def _is_transient_model_error(error: BaseException) -> bool:
+        transient_error_names = {
+            "APITimeoutError",
+            "APIConnectionError",
+            "RateLimitError",
+            "InternalServerError",
+            "TimeoutError",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
+            "ConnectError",
+            "ReadError",
+            "WriteError",
+            "RemoteProtocolError",
+        }
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if type(current).__name__ in transient_error_names:
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    @staticmethod
     def _explicit_decision(query: str) -> RouteDecision | None:
         """识别无歧义的用户意图，避免明显请求被模型误分类。"""
 
@@ -256,6 +283,7 @@ class SmartRouter:
             return explicit_decision
 
         try:
+            routing_prompt = get_prompt_manager(config).get_prompt("task_router")
             llm = ModelFactory.for_task(
                 "routing",
                 temperature=0.0,
@@ -263,7 +291,7 @@ class SmartRouter:
             )
 
             messages = [
-                SystemMessage(content=ROUTE_SYSTEM_PROMPT),
+                SystemMessage(content=routing_prompt),
                 HumanMessage(content=query),
             ]
 
@@ -283,6 +311,8 @@ class SmartRouter:
                 return self._normalize_decision(response)
 
             except Exception as structured_error:
+                if self._is_transient_model_error(structured_error):
+                    raise
                 print(
                     "[SmartRoute] 结构化输出不可用，"
                     f"降级为普通 JSON: {structured_error}"
@@ -292,7 +322,7 @@ class SmartRouter:
             fallback_messages = [
                 SystemMessage(
                     content=(
-                        ROUTE_SYSTEM_PROMPT
+                        routing_prompt
                         + "\n\n"
                         + ROUTER_JSON_FALLBACK_PROMPT
                     )

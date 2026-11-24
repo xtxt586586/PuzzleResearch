@@ -19,6 +19,7 @@ class PlannerTask(BaseModel):
     context: Any = ""
     messages: Any = None
     max_queries: int = Field(default=5, ge=1, le=100)
+    max_output_tokens: int = Field(default=512, ge=1, le=4096)
 
 
 class PlannedQuery(BaseModel):
@@ -70,6 +71,9 @@ class PlannerAgent:
                     temperature=0.2,
                     config=config,
                 )
+            bind = getattr(model, "bind", None)
+            if callable(bind):
+                model = bind(max_tokens=task.max_output_tokens)
             response = model.invoke(messages, config=config)
             payload = self._parse_payload(response)
             raw_queries = payload.get("queries", [])

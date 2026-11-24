@@ -159,6 +159,7 @@ class AgentState(TypedDict,total=False):
     # ========== 用户和会话 ==========
 
     user_id: str
+    project_id: str
     thread_id: str
     agent_id: str
 
@@ -173,6 +174,7 @@ class AgentState(TypedDict,total=False):
     conversation_history: List[Dict[str, str]]
 
     research_plan: List[str]
+    planner_agent_result: Dict[str, Any]
     research_tasks: List[Dict[str, Any]]
     research_agent_results: List[Dict[str, Any]]
     research_task_parallel_limit: int
@@ -186,6 +188,7 @@ class AgentState(TypedDict,total=False):
     ]
     writer_agent_result: Dict[str, Any]
     verifier_agent_result: Dict[str, Any]
+    evaluator_agent_result: Dict[str, Any]
     plan_reviewed: bool
     human_guidance: str
     current_step: int
@@ -301,6 +304,7 @@ class AgentState(TypedDict,total=False):
 
     coordinator_action: str
     coordinator_reasoning: str
+    coordinator_agent_result: Dict[str, Any]
 
     # ========== 压缩知识 ==========
 

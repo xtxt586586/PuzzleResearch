@@ -32,8 +32,10 @@ class ScreenshotApiTests(unittest.TestCase):
     def test_save_list_and_get_screenshot(self):
         saved = main._screenshot_store().save_screenshot(
             PNG,
-            action="test",
+            action="browser_manual",
             thread_id="thread-001",
+            page_url="https://example.com/research",
+            metadata={"title": "Research page"},
         )
 
         listed = self.client.get(
@@ -51,6 +53,18 @@ class ScreenshotApiTests(unittest.TestCase):
             listed.json()["count"],
             1,
         )
+        self.assertEqual(
+            listed.json()["screenshots"][0]["action"],
+            "browser_manual",
+        )
+        self.assertEqual(
+            listed.json()["screenshots"][0]["page_url"],
+            "https://example.com/research",
+        )
+        self.assertEqual(
+            listed.json()["screenshots"][0]["title"],
+            "Research page",
+        )
 
         response = self.client.get(
             saved["url"]
@@ -67,6 +81,48 @@ class ScreenshotApiTests(unittest.TestCase):
         self.assertEqual(
             response.content,
             PNG,
+        )
+
+    def test_list_screenshots_does_not_match_thread_id_substrings(self):
+        store = main._screenshot_store()
+        matching = store.save_screenshot(
+            PNG,
+            action="browser_screenshot",
+            thread_id="thread-001",
+        )
+        store.save_screenshot(
+            PNG,
+            action="browser_screenshot",
+            thread_id="other-thread-001",
+        )
+
+        listed = store.list_screenshots(
+            thread_id="thread-001",
+        )
+
+        self.assertEqual(
+            [item["filename"] for item in listed],
+            [matching["filename"]],
+        )
+
+    def test_list_screenshots_keeps_sanitized_thread_ids_distinct(self):
+        store = main._screenshot_store()
+        matching = store.save_screenshot(
+            PNG,
+            action="browser_screenshot",
+            thread_id="thread/a",
+        )
+        store.save_screenshot(
+            PNG,
+            action="browser_screenshot",
+            thread_id="thread?a",
+        )
+
+        listed = store.list_screenshots(thread_id="thread/a")
+
+        self.assertEqual(
+            [item["filename"] for item in listed],
+            [matching["filename"]],
         )
 
     def test_missing_screenshot_returns_404(self):
@@ -117,6 +173,9 @@ class ScreenshotApiTests(unittest.TestCase):
         self.assertEqual(
             response.json()["deleted_count"],
             1,
+        )
+        self.assertFalse(
+            Path(f"{saved['path']}.json").exists(),
         )
 
 

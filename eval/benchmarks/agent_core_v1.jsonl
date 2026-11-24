@@ -1,0 +1,10 @@
+{"id":"vector-db-selection","query":"比较 Milvus、Qdrant 和 pgvector 在中小型项目中的选型，包括部署运维与长期成本。","expected_fields":["部署","运维","成本","适用场景"],"constraints":{"must_compare":true},"metadata":{"category":"comparison","review":"人工核对来源与成本假设"}}
+{"id":"database-selection","query":"比较 PostgreSQL 和 MySQL 在中小型互联网项目中的适用场景和运维成本。","expected_fields":["功能","适用场景","运维","成本"],"constraints":{"must_compare":true},"metadata":{"category":"comparison"}}
+{"id":"rag-evaluation","query":"如何评估企业文档问答系统的检索质量与回答质量？","expected_fields":["检索","回答","指标","评估方法"],"metadata":{"category":"multi_dimension"}}
+{"id":"agent-approval","query":"设计 Agent 工具调用的人工审批和恢复流程，讨论重复提交及失败处理。","expected_fields":["审批","恢复","重复","失败"],"metadata":{"category":"workflow"}}
+{"id":"mult-agent-coordination","query":"比较多 Agent 顺序执行与并行执行的适用场景、成本和失败处理。","expected_fields":["顺序","并行","成本","失败"],"metadata":{"category":"comparison"}}
+{"id":"cache-design","query":"为小型知识库问答系统设计缓存策略，分析一致性和失效方式。","expected_fields":["缓存","一致性","失效","风险"],"metadata":{"category":"design"}}
+{"id":"observability","query":"设计 Agent 系统的可观测性方案，覆盖耗时、工具失败和模型开销。","expected_fields":["追踪","耗时","工具","模型"],"metadata":{"category":"design"}}
+{"id":"source-conflict","query":"当两篇资料对同一技术的性能结论冲突时，应如何核验并形成有依据的报告？","expected_fields":["来源","冲突","核验","局限"],"metadata":{"category":"evidence"}}
+{"id":"knowledge-gap","query":"研究企业部署开源大模型的方案，比较硬件、部署、运维和成本，并说明资料不足时如何处理。","expected_fields":["硬件","部署","运维","成本"],"metadata":{"category":"coverage_gap"}}
+{"id":"failure-recovery","query":"分析多 Agent 并行研究中某一分支失败时如何保留结果并安全重试。","expected_fields":["并行","失败","结果","重试"],"metadata":{"category":"failure"}}

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class TriggerType(str, Enum):
@@ -420,6 +421,7 @@ class TriggerManager:
                         self._next_run(
                             trigger.schedule,
                             now,
+                            trigger.timezone,
                         )
                     )
                     self._save()
@@ -430,6 +432,7 @@ class TriggerManager:
                         self._next_run(
                             trigger.schedule,
                             now,
+                            trigger.timezone,
                         )
                     )
                     self._save()
@@ -481,6 +484,7 @@ class TriggerManager:
         self,
         schedule: str,
         now: datetime,
+        timezone_name: str = "UTC",
     ) -> datetime:
         fields = str(schedule).split()
 
@@ -489,18 +493,33 @@ class TriggerManager:
                 "schedule 必须是五段 cron 表达式。"
             )
 
+        try:
+            local_timezone = ZoneInfo(timezone_name)
+        except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError(
+                f"无效时区：{timezone_name}"
+            ) from exc
+
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+
         candidate = now.replace(
             second=0,
             microsecond=0,
         ) + timedelta(minutes=1)
 
         for _ in range(366 * 24 * 60):
+            local_candidate = candidate.astimezone(
+                local_timezone
+            )
             values = (
-                candidate.minute,
-                candidate.hour,
-                candidate.day,
-                candidate.month,
-                (candidate.weekday() + 1) % 7,
+                local_candidate.minute,
+                local_candidate.hour,
+                local_candidate.day,
+                local_candidate.month,
+                (local_candidate.weekday() + 1) % 7,
             )
 
             if all(
@@ -558,6 +577,7 @@ class TriggerManager:
                 self._next_run(
                     trigger.schedule,
                     datetime.now(timezone.utc),
+                    trigger.timezone,
                 )
             )
 

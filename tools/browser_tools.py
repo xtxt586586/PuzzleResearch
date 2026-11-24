@@ -294,7 +294,7 @@ def build_browser_tool_definitions(
                 )
                 page.goto(
                     target,
-                    wait_until="networkidle",
+                    wait_until="domcontentloaded",
                     timeout=30000,
                 )
 
@@ -307,6 +307,8 @@ def build_browser_tool_definitions(
                     full_page=bool(full_page),
                     type="png",
                 )
+                page_url = str(getattr(page, "url", "") or target)
+                page_title = str(page.title() or "")
             finally:
                 browser.close()
 
@@ -314,7 +316,8 @@ def build_browser_tool_definitions(
             image_data,
             action="browser_screenshot",
             thread_id=normalized_thread_id,
-            page_url=target,
+            page_url=page_url,
+            metadata={"url": page_url, "title": page_title},
         )
 
         _emit_browser_event(
@@ -325,7 +328,8 @@ def build_browser_tool_definitions(
                 "action": "screenshot",
                 "url": saved["url"],
                 "filename": saved["filename"],
-                "page_url": target,
+                "page_url": page_url,
+                "title": page_title,
                 "mime_type": saved["mime_type"],
             },
         )
@@ -334,7 +338,8 @@ def build_browser_tool_definitions(
             "success": True,
             "screenshot_url": saved["url"],
             "filename": saved["filename"],
-            "page_url": target,
+            "page_url": page_url,
+            "title": page_title,
         }
 
     return [

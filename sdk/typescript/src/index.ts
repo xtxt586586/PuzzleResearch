@@ -5,8 +5,22 @@ export {
 
 export type {
   JsonObject,
-  SseEvent,
   PuzzleResearchClientOptions,
+  RequestOptions,
+  StreamOptions,
+  SessionListOptions,
+  ExportOptions,
+  TriggerListOptions,
+  TriggerExecutionOptions,
+  BrowserStreamOptions,
+  CancelChatOptions,
 } from "./client.js"
 
 export * from "./types.js"
+
+export {
+  parseSseFrame,
+  normalizeSseEvent,
+  readSseEvents,
+  readDataStreamEvents,
+} from "./sse.js"

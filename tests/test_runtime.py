@@ -263,6 +263,29 @@ class AgentRuntimeTests(unittest.TestCase):
             registry,
         )
 
+    def test_invoke_passes_conversation_history_to_graph(self):
+        runtime = AgentRuntime()
+        conversation = [
+            {"role": "user", "content": "第一问"},
+            {"role": "assistant", "content": "第一答"},
+            {"role": "user", "content": "第二问"},
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "invoke",
+            return_value={},
+        ) as graph_invoke:
+            runtime.invoke(
+                "第二问",
+                conversation_history=conversation,
+            )
+
+        self.assertEqual(
+            graph_invoke.call_args.args[0]["conversation_history"],
+            conversation,
+        )
+
     def test_invoke_rejects_empty_input(self):
         runtime = AgentRuntime()
 
@@ -1038,6 +1061,85 @@ class AgentRuntimeTests(unittest.TestCase):
         )
 
 
+    def test_invoke_pauses_and_resume_executes_edited_tool_action(self):
+        model = ApprovalPlanningModel()
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="approval-edit-profile",
+                require_tool_approval=True,
+            ),
+        )
+        thread_id = "runtime-approval-edit-sync-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = runtime.invoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+            self.assertEqual(paused_result["status"], "paused")
+
+            resumed_result = runtime.resume(
+                {
+                    "type": "edit",
+                    "edited_action": {
+                        "name": "python_executor",
+                        "args": {"code": "print(6 * 7)"},
+                    },
+                },
+                thread_id=thread_id,
+            )
+
+        self.assertEqual(resumed_result["status"], "completed")
+        self.assertEqual(
+            resumed_result["tool_results"][0]["result"]["output"].strip(),
+            "42",
+        )
+        self.assertEqual(resumed_result["tool_call_count"], 1)
+
+
+    def test_invoke_applies_legacy_approved_edit_action(self):
+        model = ApprovalPlanningModel()
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+            profile=AgentProfile(
+                name="approval-legacy-edit-profile",
+                require_tool_approval=True,
+            ),
+        )
+        thread_id = "runtime-approval-legacy-edit-sync-001"
+
+        with patch(
+            "agent.workflows.nodes.ModelFactory.for_task",
+            return_value=model,
+        ):
+            paused_result = runtime.invoke(
+                "请执行 Python 代码计算 2 加 3",
+                thread_id=thread_id,
+            )
+            self.assertEqual(paused_result["status"], "paused")
+
+            resumed_result = runtime.resume(
+                {
+                    "approved": True,
+                    "edited_action": {
+                        "name": "python_executor",
+                        "args": {"code": "print(6 * 7)"},
+                    },
+                },
+                thread_id=thread_id,
+            )
+
+        self.assertEqual(resumed_result["status"], "completed")
+        self.assertEqual(
+            resumed_result["tool_results"][0]["result"]["output"].strip(),
+            "42",
+        )
+
+
     def test_cancel_stops_paused_tool_thread_and_persists_state(self):
         model = ApprovalPlanningModel()
 
@@ -1238,22 +1340,83 @@ class AgentRuntimeTests(unittest.TestCase):
 
         result = runtime.describe_tools()
 
+        tools = {item["name"]: item for item in result}
         self.assertEqual(
-            len(result),
-            1,
+            set(tools),
+            {
+                "python_executor",
+                "create_tasks",
+                "view_tasks",
+                "update_task",
+                "get_next_task",
+                "plan_steps",
+                "ask_human",
+                "web_search",
+                "fallback_search",
+                "search_multiple_queries",
+                "tavily_search",
+                "crawl_url",
+                "crawl_urls",
+                "write_file",
+                "update_file",
+                "read_file",
+                "list_files",
+                "str_replace",
+                "delete_file",
+                "upload_file",
+                "download_file",
+                "execute_command",
+                "check_output",
+                "kill_process",
+                "list_processes",
+                "install_package",
+                "expose_port",
+                "scaffold_web_project",
+                "deploy_web_project",
+                "create_spreadsheet",
+                "write_data",
+                "read_data",
+                "format_cells",
+                "add_sheet",
+                "create_chart",
+                "create_presentation",
+                "add_slide",
+                "add_image_to_slide",
+                "add_table_to_slide",
+                "add_shape_to_slide",
+                "get_presentation_info",
+                "update_slide",
+                "delete_slide",
+                "generate_presentation_outline",
+                "outline_to_presentation",
+                "refine_presentation_outline",
+                "expand_slide_content",
+                "get_image_info",
+                "resize_image",
+                "convert_image",
+                "crop_image",
+                "compare_images",
+                "apply_image_filter",
+                "apply_image_effect",
+                "adjust_image",
+                "rotate_flip_image",
+                "add_watermark",
+                "overlay_images",
+                "create_thumbnail",
+            },
         )
         self.assertEqual(
-            result[0]["name"],
+            tools["python_executor"]["name"],
             "python_executor",
         )
         self.assertTrue(
-            result[0]["enabled"],
+            all(item["enabled"] for item in result),
         )
         self.assertTrue(
             any(
                 item["name"] == "code"
                 and item["required"] is True
-                for item in result[0]["parameters"]
+                for item in tools["python_executor"]["parameters"]
             )
         )
 
@@ -1269,13 +1432,8 @@ class AgentRuntimeTests(unittest.TestCase):
 
         result = runtime.describe_tools()
 
-        self.assertEqual(
-            len(result),
-            1,
-        )
-        self.assertFalse(
-            result[0]["enabled"],
-        )
+        self.assertEqual(len(result), 59)
+        self.assertTrue(all(not item["enabled"] for item in result))
 
     def test_describe_tools_uses_custom_registry(self):
         def echo(message: str) -> str:
@@ -1328,13 +1486,8 @@ class AgentRuntimeTests(unittest.TestCase):
 
         result = runtime.describe_tools()
 
-        self.assertEqual(
-            len(result),
-            1,
-        )
-        self.assertFalse(
-            result[0]["enabled"],
-        )
+        self.assertEqual(len(result), 59)
+        self.assertTrue(all(not item["enabled"] for item in result))
 
 
     def test_get_state_forwards_thread_and_subgraphs(self):
@@ -2880,6 +3033,35 @@ class AgentRuntimeAsyncTests(
         self.assertEqual(
             runtime_config["configurable"]["thread_id"],
             "async-events-thread-002",
+        )
+
+    async def test_aupdate_state_forwards_values_and_thread(self):
+        runtime = AgentRuntime(
+            checkpointer=InMemorySaver(),
+        )
+        conversation = [
+            {"role": "user", "content": "完整历史"},
+        ]
+
+        with patch.object(
+            runtime.graph,
+            "aupdate_state",
+            new_callable=AsyncMock,
+            return_value={"updated": True},
+        ) as graph_aupdate_state:
+            result = await runtime.aupdate_state(
+                thread_id="archive-thread-001",
+                values={"conversation_history": conversation},
+            )
+
+        self.assertEqual(result, {"updated": True})
+        self.assertEqual(
+            graph_aupdate_state.call_args.args[0]["configurable"]["thread_id"],
+            "archive-thread-001",
+        )
+        self.assertEqual(
+            graph_aupdate_state.call_args.args[1]["conversation_history"],
+            conversation,
         )
 
     async def test_acancel_persists_cancelled_state(self):

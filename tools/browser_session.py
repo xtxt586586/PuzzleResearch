@@ -264,5 +264,18 @@ class BrowserSessionManager:
         if session is not None:
             session.close()
 
+    def reset_all(self) -> int:
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+        return len(sessions)
+
 
 browser_sessions = BrowserSessionManager()

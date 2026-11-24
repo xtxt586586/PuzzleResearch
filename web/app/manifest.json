@@ -1,0 +1,17 @@
+{
+  "name": "PuzzleResearch",
+  "short_name": "PuzzleResearch",
+  "description": "面向深度研究的多智能体工作台",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#157eb8",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

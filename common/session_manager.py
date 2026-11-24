@@ -143,6 +143,13 @@ class SessionManager:
     def _snapshot_interrupts(
             snapshot: Any,
     ) -> list[Any]:
+        def normalize(value: Any) -> list[Any]:
+            if value is None:
+                return []
+            if isinstance(value, (list, tuple, set)):
+                return list(value)
+            return [value]
+
         if isinstance(snapshot, Mapping):
             interrupts = snapshot.get(
                 "interrupts"
@@ -170,16 +177,53 @@ class SessionManager:
                 None,
             )
 
-        if interrupts is None:
-            return []
+        normalized = normalize(interrupts)
+        if normalized:
+            return normalized
 
-        if isinstance(
-                interrupts,
-                (list, tuple, set),
+        tasks = (
+            snapshot.get("tasks", [])
+            if isinstance(snapshot, Mapping)
+            else getattr(snapshot, "tasks", [])
+        ) or []
+        task_interrupts: list[Any] = []
+        for task in tasks:
+            task_values = (
+                task.get("interrupts", [])
+                if isinstance(task, Mapping)
+                else getattr(task, "interrupts", [])
+            ) or []
+            task_interrupts.extend(normalize(task_values))
+
+        if task_interrupts:
+            return task_interrupts
+
+        values = (
+            snapshot.get("values", {})
+            if isinstance(snapshot, Mapping)
+            else getattr(snapshot, "values", {})
+        ) or {}
+        if (
+            isinstance(values, Mapping)
+            and str(values.get("status", "")).lower() == "paused"
         ):
-            return list(interrupts)
+            pending_calls = values.get("pending_tool_calls", [])
+            if isinstance(pending_calls, list):
+                return [
+                    {
+                        "type": "tool_approval",
+                        "tool_name": str(
+                            call.get("tool_name") or call.get("name") or ""
+                        ),
+                        "arguments": call.get("arguments", call.get("args", {})),
+                        "message": "等待工具执行审批。",
+                        "allowed_decisions": ["approve", "edit", "reject"],
+                    }
+                    for call in pending_calls
+                    if isinstance(call, Mapping)
+                ]
 
-        return [interrupts]
+        return []
 
     @staticmethod
     def _status(

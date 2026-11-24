@@ -12,10 +12,15 @@ from common.config import settings
 TaskType = Literal[
     "routing",
     "planning",
+    "query_gen",
     "research",
+    "critique",
+    "synthesis",
     "writing",
     "evaluation",
     "critic",
+    "reflection",
+    "gap_analysis",
     "clarification"
 ]
 
@@ -111,16 +116,19 @@ class ModelFactory:
         if task == "research":
             return settings.effective_researcher_model
 
+        if task in {"query_gen", "synthesis"}:
+            return settings.primary_model
+
         if task == "writing":
             return settings.effective_writer_model
 
         if task == "evaluation":
             return settings.effective_evaluator_model
 
-        if task == "critic":
+        if task in {"critic", "critique"}:
             return settings.critic_model or settings.reasoning_model
 
-        if task == "clarification":
+        if task in {"clarification", "reflection", "gap_analysis"}:
             return settings.reasoning_model
 
         raise ValueError(f"不支持的任务类型：{task}")
@@ -144,17 +152,27 @@ class ModelFactory:
         ModelFactory.for_task("evaluation")
         """
         model_name = (
-            cls._configured_model(config)
+            cls._configured_model(config, task)
             or cls.model_name_for_task(task)
         )
 
         if temperature is None:
-            if task in {"routing","evaluation","critic"}:
+            if task in {"routing", "evaluation", "critic"}:
                 temperature = 0.0
+            elif task == "critique":
+                temperature = 0.2
             elif task == "planning":
+                temperature = 0.8
+            elif task == "query_gen":
                 temperature = 0.8
             elif task == "research":
                 temperature = 0.2
+            elif task == "synthesis":
+                temperature = 0.5
+            elif task == "reflection":
+                temperature = 0.5
+            elif task == "gap_analysis":
+                temperature = 0.4
             else:
                 temperature = 0.7
 
@@ -169,6 +187,7 @@ class ModelFactory:
     def _configured_model(
             cls,
             config: Mapping[str, Any] | None,
+            task: TaskType,
     ) -> str | None:
         if not isinstance(config,Mapping):
             return None
@@ -181,14 +200,34 @@ class ModelFactory:
         if not isinstance(configurable,Mapping):
             return None
 
-        candidates = [
-            configurable.get("model_override"),
-            getattr(
-                configurable.get("agent_profile"),
-                "model",
-                None,
-            ),
-        ]
+        task_settings = {
+            "planning": ("planning_model", "planner_model"),
+            "research": ("research_model", "researcher_model"),
+            "writing": ("writing_model", "writer_model"),
+            "evaluation": ("evaluation_model", "evaluator_model"),
+            "critic": ("critic_model", "critique_model"),
+            "critique": ("critique_model", "critic_model"),
+        }
+        task_keys = task_settings.get(task, (f"{task}_model",))
+        candidates = [configurable.get(key) for key in task_keys]
+
+        if task in {
+            "routing", "planning", "evaluation", "critic", "critique",
+            "clarification", "reflection", "gap_analysis",
+        }:
+            candidates.append(configurable.get("reasoning_model"))
+
+        candidates.extend(
+            (
+                configurable.get("model_override"),
+                configurable.get("model"),
+                getattr(
+                    configurable.get("agent_profile"),
+                    "model",
+                    None,
+                ),
+            )
+        )
 
         for candidate in candidates:
             if isinstance(candidate,str):

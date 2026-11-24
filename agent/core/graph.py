@@ -32,6 +32,7 @@ from agent.workflows.nodes import (
     writer_node,
     deep_writer_node,
     evaluator_node,
+    verifier_agent_node,
     revise_node,
     agent_tool_node,
     agent_plan_node,
@@ -78,6 +79,22 @@ def fan_out_research_tasks(state: AgentState) -> list[Send] | str:
     ).strip()
     if budget_stop_reason:
         return "sources_review"
+
+    if isinstance(budget, Mapping):
+        try:
+            max_tokens = max(int(budget.get("max_tokens", 0) or 0), 0)
+            tokens_used = max(int(budget.get("tokens_used", 0) or 0), 0)
+            max_seconds = max(float(budget.get("max_seconds", 0) or 0), 0.0)
+            elapsed_seconds = max(float(budget.get("elapsed_seconds", 0) or 0), 0.0)
+        except (TypeError, ValueError, OverflowError):
+            max_tokens = tokens_used = 0
+            max_seconds = elapsed_seconds = 0.0
+        research_token_ceiling = max(1, int(max_tokens * 0.35))
+        if max_tokens and tokens_used >= research_token_ceiling:
+            return "sources_review"
+        research_seconds_ceiling = max_seconds * 0.6
+        if max_seconds and elapsed_seconds >= research_seconds_ceiling:
+            return "sources_review"
 
     tasks = [
         item
@@ -172,15 +189,22 @@ def research_task_worker_node(
     elapsed = max(float(prior_budget.get("elapsed_seconds", 0) or 0), 0.0)
     tokens = max(int(prior_budget.get("tokens_used", 0) or 0), 0)
     # Keep room for planning, coordination, writing, and evaluation calls.
-    research_token_ceiling = max(1, int(max_tokens * 0.5))
+    research_token_ceiling = max(1, int(max_tokens * 0.35))
     token_share = max(1, (research_token_ceiling - tokens) // worker_count)
-    seconds_share = max(0.1, (max_seconds - elapsed) / worker_count)
+    research_seconds_ceiling = max_seconds * 0.6
+    seconds_share = max(
+        0.1,
+        (research_seconds_ceiling - elapsed) / worker_count,
+    )
 
     # Each concurrent branch receives a disjoint slice of the remaining run budget.
     branch_budget = {
         **prior_budget,
+        "max_seconds": seconds_share,
+        "max_tokens": token_share,
         "elapsed_seconds": 0.0,
         "tokens_used": max(1, len(str(state.get("input", ""))) // 4),
+        "token_usage_by_stage": {},
         "searches_used": 0,
         "stop_reason": "",
         "started_at_epoch": 0.0,
@@ -188,13 +212,20 @@ def research_task_worker_node(
     }
     artifacts["research_budget"] = branch_budget
     branch_state = {
-        **dict(state),
+        "input": str(state.get("input", "")),
+        "user_id": str(state.get("user_id", "") or ""),
+        "project_id": str(state.get("project_id", "") or ""),
+        "thread_id": str(state.get("thread_id", "") or ""),
+        "domain": state.get("domain", "general"),
+        "domain_config": dict(state.get("domain_config") or {}),
+        "cancel_token_id": state.get("cancel_token_id"),
+        "is_cancelled": bool(state.get("is_cancelled", False)),
         "research_plan": [topic],
         "research_tasks": [task],
+        "deepsearch_epoch": int(state.get("deepsearch_epoch", 1) or 1),
+        "deepsearch_query_history": [],
+        "deepsearch_artifacts": {"research_budget": branch_budget},
         "research_tree": {},
-        "research_agent_results": [],
-        "research_task_checkpoints": [],
-        "deepsearch_artifacts": artifacts,
         "active_research_task": task,
     }
     branch_config = dict(config or {})
@@ -319,6 +350,21 @@ def research_task_aggregate_node(state: AgentState) -> dict[str, Any]:
             max(int(item.get("tokens_used", 0) or 0) - max(1, len(str(state.get("input", ""))) // 4), 0)
             for item in budgets
         )
+        combined_stage_usage = dict(base_budget.get("token_usage_by_stage") or {})
+        for item in budgets:
+            stage_usage = item.get("token_usage_by_stage") or {}
+            if not isinstance(stage_usage, Mapping):
+                continue
+            for stage, count in stage_usage.items():
+                try:
+                    combined_stage_usage[str(stage)] = (
+                        max(int(combined_stage_usage.get(str(stage), 0) or 0), 0)
+                        + max(int(count or 0), 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        if combined_stage_usage:
+            combined["token_usage_by_stage"] = combined_stage_usage
         combined["searches_used"] = base_searches + sum(
             max(int(item.get("searches_used", 0) or 0), 0) for item in budgets
         )
@@ -397,6 +443,7 @@ def research_task_aggregate_node(state: AgentState) -> dict[str, Any]:
             "result_count": len(result["search_results"]),
             "source_count": len(result["sources"]),
             "tokens_used": combined_budget["tokens_used"],
+            "token_usage_by_stage": dict(combined_budget.get("token_usage_by_stage") or {}),
             "elapsed_seconds": combined_budget["elapsed_seconds"],
             "searches_used": combined_budget["searches_used"],
             "max_tokens": combined_budget["max_tokens"],
@@ -472,6 +519,7 @@ def create_research_graph(checkpointer=None, store=None):
     workflow.add_node("writer",writer_node)
     workflow.add_node("deep_writer",deep_writer_node)
     workflow.add_node("evaluator",evaluator_node)
+    workflow.add_node("verifier", verifier_agent_node)
     workflow.add_node("revise",revise_node)
     workflow.add_node("agent_plan",agent_plan_node)
     workflow.add_node("agent_fast_path", agent_fast_path_node)
@@ -635,7 +683,7 @@ def create_research_graph(checkpointer=None, store=None):
             or state.get("status") in {"cancelled", "failed"}
         ):
             return "finalize"
-        return "evaluator"
+        return "verifier" if state.get("route") == "deep" else "evaluator"
 
 
 
@@ -750,8 +798,9 @@ def create_research_graph(checkpointer=None, store=None):
     workflow.add_conditional_edges(
         "draft_review",
         draft_review_dispatch,
-        ["finalize", "evaluator"],
+        ["finalize", "verifier", "evaluator"],
     )
+    workflow.add_edge("verifier", "evaluator")
     def after_evaluation(state: AgentState) -> str:
         if use_hierarchical_agents and state.get("route") == "deep":
             return "coordinator"
@@ -761,6 +810,7 @@ def create_research_graph(checkpointer=None, store=None):
         "deep_followup": "deep_followup",
         "revise": "revise",
         "human_review": "human_review",
+        "finalize": "finalize",
     }
     if use_hierarchical_agents:
         evaluator_targets["coordinator"] = "coordinator"
@@ -770,9 +820,12 @@ def create_research_graph(checkpointer=None, store=None):
         after_evaluation,
         evaluator_targets,
     )
-    # Match Weaver: human draft review applies to the writer's initial draft;
-    # automated revisions return directly to evaluation.
-    workflow.add_edge("revise", "evaluator")
+    # Re-verify every revised deep-research report before evaluating it again.
+    workflow.add_conditional_edges(
+        "revise",
+        lambda state: "verifier" if state.get("route") == "deep" else "evaluator",
+        {"verifier": "verifier", "evaluator": "evaluator"},
+    )
     workflow.add_edge("human_review","finalize")
     workflow.add_edge("finalize",END)
 
@@ -896,7 +949,7 @@ def fan_out_deep_searches(
 
 def evaluation_decision(
         state: AgentState
-) -> Literal["deep_followup","revise","human_review"]:
+) -> Literal["deep_followup","revise","human_review","finalize"]:
     """
     根据评估结果决定修订或结束。
 
@@ -908,6 +961,8 @@ def evaluation_decision(
     verdict = str(
         state.get("verdict","pass")
     ).strip().lower()
+    if verdict == "evaluation_failed":
+        return "finalize"
 
     raw_missing_topics = state.get("missing_topics") or []
     if isinstance(raw_missing_topics, str):

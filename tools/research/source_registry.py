@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+
+_TRACKING_PARAMS = {
+    "fbclid",
+    "gclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "ref_src",
+    "source",
+}
+
+
+@dataclass
+class SourceRecord:
+    source_id: str
+    canonical_url: str
+    original_url: str
+    domain: str
+    title: str = ""
+
+
+class SourceRegistry:
+    def __init__(self) -> None:
+        self._by_canonical: dict[str, SourceRecord] = {}
+
+    def canonicalize_url(self, url: str) -> str:
+        raw = str(url or "").strip()
+        if not raw:
+            return ""
+        if "://" not in raw:
+            raw = f"https://{raw}"
+
+        parsed = urlsplit(raw)
+        scheme = (parsed.scheme or "https").lower()
+        netloc = parsed.netloc.lower()
+        if ":" in netloc:
+            host, port = netloc.rsplit(":", 1)
+            if (scheme == "http" and port == "80") or (
+                scheme == "https" and port == "443"
+            ):
+                netloc = host
+
+        query_items = []
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            normalized_key = key.strip().lower()
+            if normalized_key.startswith("utm_") or normalized_key in _TRACKING_PARAMS:
+                continue
+            query_items.append((key, value))
+        query_items.sort()
+        return urlunsplit(
+            (scheme, netloc, parsed.path or "/", urlencode(query_items, doseq=True), "")
+        )
+
+    def source_id_for_url(self, canonical_url: str) -> str:
+        digest = hashlib.sha1(canonical_url.encode("utf-8")).hexdigest()
+        return f"src_{digest[:12]}"
+
+    def register(self, url: str, title: str = "") -> SourceRecord | None:
+        canonical_url = self.canonicalize_url(url)
+        if not canonical_url:
+            return None
+        existing = self._by_canonical.get(canonical_url)
+        if existing is not None:
+            if title and not existing.title:
+                existing.title = title
+            return existing
+
+        parsed = urlsplit(canonical_url)
+        record = SourceRecord(
+            source_id=self.source_id_for_url(canonical_url),
+            canonical_url=canonical_url,
+            original_url=url,
+            domain=parsed.netloc,
+            title=title,
+        )
+        self._by_canonical[canonical_url] = record
+        return record
+
+    def get(self, url: str) -> SourceRecord | None:
+        return self._by_canonical.get(self.canonicalize_url(url))
+
+    def all(self) -> list[SourceRecord]:
+        return list(self._by_canonical.values())
