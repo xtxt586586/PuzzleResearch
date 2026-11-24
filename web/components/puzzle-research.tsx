@@ -1137,14 +1137,6 @@ function evidenceClaimStatus(status: string): {
   const normalized = status.trim().toLowerCase()
 
   if (
-    normalized.includes("support") ||
-    normalized.includes("verified") ||
-    normalized.includes("confirm")
-  ) {
-    return { label: "有证据支持", className: "supported" }
-  }
-
-  if (
     normalized.includes("contradict") ||
     normalized.includes("conflict")
   ) {
@@ -1156,6 +1148,14 @@ function evidenceClaimStatus(status: string): {
     normalized.includes("missing")
   ) {
     return { label: "缺少证据", className: "unsupported" }
+  }
+
+  if (
+    normalized.includes("support") ||
+    normalized.includes("verified") ||
+    normalized.includes("confirm")
+  ) {
+    return { label: "有证据支持", className: "supported" }
   }
 
   return { label: status || "待核验", className: "pending" }

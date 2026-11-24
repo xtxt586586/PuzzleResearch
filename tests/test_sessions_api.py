@@ -245,7 +245,7 @@ class SessionApiTests(unittest.TestCase):
             ],
         )
 
-    def test_interrupt_status_merges_weaver_review_capabilities(self):
+    def test_interrupt_status_merges_puzzleresearch_review_capabilities(self):
         self.manager.get_state = lambda thread_id: {
             "thread_id": thread_id,
             "interrupts": [

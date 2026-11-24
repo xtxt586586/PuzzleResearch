@@ -7,8 +7,6 @@
 - 开发工具：PyCharm 2025.3.3
 - 操作系统：Windows
 - 模型服务：DeepSeek
-- 参考项目：Weaver
-- 参考版本：745693afbf1e8a5b68dad5f616b2681cb2042ee9
 
 ---
 

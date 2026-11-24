@@ -59,7 +59,7 @@ class WorkspaceApiTests(unittest.TestCase):
 
         response = self.client.get(
             "/api/sessions/workspace-thread/workspace/files",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -71,7 +71,7 @@ class WorkspaceApiTests(unittest.TestCase):
 
         response = self.client.get(
             "/api/sessions/workspace-thread/workspace/files/reports/final.md",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -85,7 +85,7 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_workspace_files_are_not_visible_to_another_owner(self):
         response = self.client.get(
             "/api/sessions/workspace-thread/workspace/files",
-            headers={"X-Weaver-User": "intruder-001"},
+            headers={"X-PuzzleResearch-User": "intruder-001"},
         )
 
         self.assertEqual(response.status_code, 403)
@@ -93,7 +93,7 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_missing_file_returns_not_found(self):
         response = self.client.get(
             "/api/sessions/workspace-thread/workspace/files/missing.txt",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
         )
 
         self.assertEqual(response.status_code, 404)
@@ -101,7 +101,7 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_upload_creates_utf8_text_file_and_returns_it_in_list(self):
         response = self.client.post(
             "/api/sessions/workspace-thread/workspace/files/upload",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
             files={"file": ("研究记录.md", "阶段结论".encode("utf-8"), "text/plain")},
         )
 
@@ -113,13 +113,13 @@ class WorkspaceApiTests(unittest.TestCase):
         )
         listing = self.client.get(
             "/api/sessions/workspace-thread/workspace/files",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
         )
         self.assertEqual(listing.json()["files"], ["研究记录.md"])
 
     def test_upload_rejects_duplicate_invalid_name_and_oversized_files(self):
         endpoint = "/api/sessions/workspace-thread/workspace/files/upload"
-        headers = {"X-Weaver-User": "owner-001"}
+        headers = {"X-PuzzleResearch-User": "owner-001"}
         self.workspace.write_file("existing.txt", "original")
 
         duplicate = self.client.post(
@@ -153,7 +153,7 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_upload_requires_session_owner(self):
         response = self.client.post(
             "/api/sessions/workspace-thread/workspace/files/upload",
-            headers={"X-Weaver-User": "intruder-001"},
+            headers={"X-PuzzleResearch-User": "intruder-001"},
             files={"file": ("private.txt", b"text", "text/plain")},
         )
 
@@ -164,11 +164,11 @@ class WorkspaceApiTests(unittest.TestCase):
 
         forbidden = self.client.delete(
             "/api/sessions/workspace-thread/workspace/files/reports/final.md",
-            headers={"X-Weaver-User": "intruder-001"},
+            headers={"X-PuzzleResearch-User": "intruder-001"},
         )
         deleted = self.client.delete(
             "/api/sessions/workspace-thread/workspace/files/reports/final.md",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
         )
 
         self.assertEqual(forbidden.status_code, 403)
@@ -179,7 +179,7 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_delete_file_returns_not_found_for_missing_file(self):
         response = self.client.delete(
             "/api/sessions/workspace-thread/workspace/files/missing.txt",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
         )
 
         self.assertEqual(response.status_code, 404)
@@ -187,7 +187,7 @@ class WorkspaceApiTests(unittest.TestCase):
     def test_missing_session_returns_not_found(self):
         response = self.client.get(
             "/api/sessions/missing-thread/workspace/files",
-            headers={"X-Weaver-User": "owner-001"},
+            headers={"X-PuzzleResearch-User": "owner-001"},
         )
 
         self.assertEqual(response.status_code, 404)

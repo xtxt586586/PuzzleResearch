@@ -63,5 +63,5 @@ reports/
 .DS_Store
 Thumbs.db
 
-weaver-reference/
+*-reference/
 .docker-secrets/

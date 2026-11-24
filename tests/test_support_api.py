@@ -126,7 +126,7 @@ class SupportApiTests(unittest.TestCase):
                         "Authorization": (
                             "Bearer secret-key"
                         ),
-                        "X-Weaver-User": "owner-001",
+                        "X-PuzzleResearch-User": "owner-001",
                     },
                     json={
                         "message": "测试身份隔离",

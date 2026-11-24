@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node test/sse.test.mjs && node test/client.test.mjs && node test/api.test.mjs && node test/sse-parser.test.mjs && node test/control-plane.test.mjs && node test/documents.test.mjs && node test/workspace.test.mjs && node test/weaver-compatibility.test.mjs && node test/capabilities.test.mjs && node test/audio-browser.test.mjs && node test/collaboration.test.mjs && node test/triggers.test.mjs && node test/support.test.mjs && node test/browser-stream.test.mjs && node test/request-options.test.mjs && node test/exports.test.mjs && node test/stream-parity.test.mjs && node test/research-quality.test.mjs"
+    "test": "npm run build && node test/sse.test.mjs && node test/client.test.mjs && node test/api.test.mjs && node test/sse-parser.test.mjs && node test/control-plane.test.mjs && node test/documents.test.mjs && node test/workspace.test.mjs && node test/puzzleresearch-compatibility.test.mjs && node test/capabilities.test.mjs && node test/audio-browser.test.mjs && node test/collaboration.test.mjs && node test/triggers.test.mjs && node test/support.test.mjs && node test/browser-stream.test.mjs && node test/request-options.test.mjs && node test/exports.test.mjs && node test/stream-parity.test.mjs && node test/research-quality.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

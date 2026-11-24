@@ -338,7 +338,7 @@ class BrowserApiTests(unittest.TestCase):
                 "/api/browser/browser-test-thread/stream",
                 headers={
                     "Authorization": "Bearer ws-test-key",
-                    "X-Weaver-User": "bob",
+                    "X-PuzzleResearch-User": "bob",
                 },
             ):
                 self.fail("Non-owner websocket unexpectedly connected")
@@ -389,7 +389,7 @@ class BrowserApiTests(unittest.TestCase):
                 "/api/browser/browser-test-thread/stream",
                 headers={
                     "Authorization": "Bearer ws-test-key",
-                    "X-Weaver-User": "alice",
+                    "X-PuzzleResearch-User": "alice",
                 },
             ) as websocket,
         ):

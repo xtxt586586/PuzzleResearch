@@ -1190,7 +1190,7 @@ class PublicApiTests(unittest.TestCase):
                 "/api/config/public",
                 headers={
                     "Authorization": "Bearer secret-key",
-                    "X-Weaver-User": "user-001",
+                    "X-PuzzleResearch-User": "user-001",
                 },
             )
 
@@ -1219,7 +1219,7 @@ class PublicApiTests(unittest.TestCase):
                     "/api/chat",
                     headers={
                         "Authorization": "Bearer secret-key",
-                        "X-Weaver-User": "owner-001",
+                        "X-PuzzleResearch-User": "owner-001",
                     },
                     json={
                         "messages": [

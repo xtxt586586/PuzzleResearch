@@ -65,7 +65,7 @@ class ChatMemoryTests(unittest.TestCase):
                     "/api/chat",
                     headers={
                         "Authorization": "Bearer secret-key",
-                        "X-Weaver-User": "owner-001",
+                        "X-PuzzleResearch-User": "owner-001",
                     },
                     json={
                         "messages": [
@@ -136,7 +136,7 @@ class ChatMemoryTests(unittest.TestCase):
             ):
                 response = self.client.post(
                     "/api/research/sse",
-                    headers={"X-Weaver-User": "research-user"},
+                    headers={"X-PuzzleResearch-User": "research-user"},
                     json={"query": "比较本地部署与云端部署"},
                 )
 
@@ -187,7 +187,7 @@ class ChatMemoryTests(unittest.TestCase):
             ):
                 response = self.client.post(
                     "/api/chat/sse",
-                    headers={"X-Weaver-User": "failure-user"},
+                    headers={"X-PuzzleResearch-User": "failure-user"},
                     json={
                         "messages": [
                             {"role": "user", "content": "这次会失败"}

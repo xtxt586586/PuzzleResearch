@@ -544,7 +544,7 @@ class MCPStdioConnection(_MCPConnection):
 
 
 class MCPSSEConnection(_MCPConnection):
-    """Legacy MCP SSE transport used by Weaver-compatible servers."""
+    """Legacy MCP SSE transport used by PuzzleResearch-compatible servers."""
 
     def __init__(self, spec: MCPServerSpec) -> None:
         super().__init__(spec)

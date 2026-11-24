@@ -63,7 +63,7 @@ class XMLToolCall:
 
 
 class XMLToolParser:
-    """Parse Weaver-style ``function_calls`` blocks into validated data shapes."""
+    """Parse PuzzleResearch-style ``function_calls`` blocks into validated data shapes."""
 
     def __init__(self) -> None:
         self.parsed_calls = 0

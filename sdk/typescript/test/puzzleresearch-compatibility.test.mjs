@@ -75,4 +75,4 @@ assert.deepEqual(
   ],
 )
 
-console.log("weaver-compatibility.test.mjs passed")
+console.log("puzzleresearch-compatibility.test.mjs passed")

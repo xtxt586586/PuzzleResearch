@@ -48,7 +48,7 @@ class InternalAuthTests(unittest.TestCase):
                 "/api/runs/thread_alice",
                 headers={
                     "Authorization": "Bearer test-key",
-                    "X-Weaver-User": "bob",
+                    "X-PuzzleResearch-User": "bob",
                 },
             )
 

@@ -1,6 +1,14 @@
 # PuzzleResearch
 
-PuzzleResearch 是一个以 LangGraph 为运行时核心、参考 Weaver 架构手动实现的 AI Agent 研究平台。它组合任务路由、工具调用、多轮与树状 Deep Research、证据与质量控制、会话恢复及中文 Web 工作台；不直接复制或依赖 Weaver 源码。
+PuzzleResearch 是一个以 LangGraph 为运行时核心的 AI Agent 研究平台。它组合任务路由、工具调用、多轮与树状 Deep Research、证据与质量控制、会话恢复及中文 Web 工作台。
+
+## 界面预览
+
+![研究工作台](docs/images/workbench.png)
+
+![深度研究过程](docs/images/research-workflow.png)
+
+上图来自受限预算的真实研究请求，达到检索次数上限时系统会标记结果不完整。
 
 ## 当前能力
 
@@ -31,6 +39,8 @@ flowchart LR
 ```
 
 数据库和 Redis 按配置启用；本地开发可以使用内存存储。模型与搜索服务需要单独配置，工具审批、外部服务和研究预算由运行配置控制。
+
+多用户代理环境可通过 `PUZZLERESEARCH_AUTH_USER_HEADER` 配置可信身份请求头，默认使用 `X-Auth-User`；兼容请求头为 `X-PuzzleResearch-User`。Prometheus 指标使用 `puzzleresearch_` 前缀。身份请求头必须由可信代理设置。
 
 ## 技术栈
 
@@ -123,9 +133,3 @@ Invoke-RestMethod http://127.0.0.1:9000/ready
 启动脚本调用 `docker/compose.yaml`，启动后端、PostgreSQL 和 Redis；后端默认映射到本机 `9000`。Web 前端需单独启动；使用 Docker 默认端口时，不设置 `NEXT_PUBLIC_API_URL` 即可连接。如之前为本地 `8001` 配置了 `web/.env.local`，将其改为 `http://127.0.0.1:9000` 并重新启动前端。
 
 启动脚本会使用 `.docker-secrets/postgres_password`；首次启动且不存在旧数据库卷时会生成密码。已有数据库卷时应保留并使用其原密码。直接运行 Compose 时，需要通过环境变量或 `.env` 提供 `POSTGRES_PASSWORD`；模板中的占位值不能直接用于部署。`.docker-secrets/` 已从 Docker 构建上下文排除。
-
-## Weaver 参考版本
-
-- 上游：[skygazer42/Weaver](https://github.com/skygazer42/Weaver)
-- 本地对照版本：`745693afbf1e8a5b68dad5f616b2681cb2042ee9`
-- PuzzleResearch 保留自身技术选型，并以独立代码实现对照功能。

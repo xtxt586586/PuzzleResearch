@@ -240,7 +240,7 @@ def build_quality_diagnostics(
     min_known_results: int = 3,
     min_fresh_ratio: float = 0.4,
 ) -> dict[str, Any]:
-    """Build Weaver-compatible query coverage and source freshness diagnostics."""
+    """Build PuzzleResearch-compatible query coverage and source freshness diagnostics."""
     query_coverage = analyze_query_coverage(queries)
     freshness_summary = summarize_freshness(search_runs)
     time_sensitive_query = is_time_sensitive_topic(topic)

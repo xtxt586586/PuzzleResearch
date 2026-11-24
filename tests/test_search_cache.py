@@ -99,7 +99,7 @@ class SearchCacheTests(unittest.TestCase):
         self.assertEqual(len(provider.calls), 2)
         self.assertEqual(manager.cache_api_stats()["similar_hits"], 1)
 
-    def test_cache_api_matches_weaver_response_contract(self):
+    def test_cache_api_matches_puzzleresearch_response_contract(self):
         state = get_default_search_runtime_state()
         manager, _ = self.manager(state)
         manager.clear_cache()

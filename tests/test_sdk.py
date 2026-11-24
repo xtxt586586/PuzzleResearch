@@ -314,7 +314,7 @@ class PuzzleResearchClientTests(unittest.TestCase):
         client.close()
 
 
-    def test_resume_interrupt_sends_weaver_payload(self):
+    def test_resume_interrupt_sends_puzzleresearch_payload(self):
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(
                 request.method,

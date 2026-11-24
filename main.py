@@ -238,7 +238,7 @@ def _prometheus_gauge(name: str, documentation: str, labels=()):
 
 http_requests_total = (
     _prometheus_counter(
-        "weaver_http_requests_total",
+        "puzzleresearch_http_requests_total",
         "Total HTTP requests",
         ("method", "path", "status"),
     )
@@ -247,29 +247,29 @@ http_requests_total = (
 )
 http_inprogress = (
     _prometheus_gauge(
-        "weaver_http_inprogress",
+        "puzzleresearch_http_inprogress",
         "In-flight HTTP requests",
     )
     if bool(getattr(settings, "enable_prometheus", False))
     else None
 )
 sse_active_connections = _prometheus_gauge(
-    "weaver_sse_active_connections",
+    "puzzleresearch_sse_active_connections",
     "Active SSE connections",
     ("endpoint",),
 )
 ws_active_connections = _prometheus_gauge(
-    "weaver_ws_active_connections",
+    "puzzleresearch_ws_active_connections",
     "Active WebSocket connections",
     ("endpoint",),
 )
 browser_ws_frames_total = _prometheus_counter(
-    "weaver_browser_ws_frames_total",
+    "puzzleresearch_browser_ws_frames_total",
     "Browser WS frames emitted (attempted)",
     ("source",),
 )
 browser_ws_dropped_messages_total = _prometheus_counter(
-    "weaver_browser_ws_dropped_messages_total",
+    "puzzleresearch_browser_ws_dropped_messages_total",
     "WS messages dropped due to send timeout/backpressure",
     ("endpoint",),
 )
@@ -868,15 +868,15 @@ def _extra_trusted_user_id(request: Request) -> str:
             getattr(
                 settings,
                 "auth_user_header",
-                "X-Weaver-User",
+                "X-PuzzleResearch-User",
             )
-            or "X-Weaver-User"
+            or "X-PuzzleResearch-User"
         ).strip()
     )
 
     return (
         request.headers.get(configured_header)
-        or request.headers.get("X-Weaver-User")
+        or request.headers.get("X-PuzzleResearch-User")
         or request.headers.get("x-user-id")
         or request.headers.get("user-id")
         or ""
@@ -1719,15 +1719,15 @@ def _resolve_request_principal(
             getattr(
                 settings,
                 "auth_user_header",
-                "X-Weaver-User",
+                "X-PuzzleResearch-User",
             )
-            or "X-Weaver-User"
+            or "X-PuzzleResearch-User"
         ).strip()
     )
 
     header_user_id = (
         request.headers.get(configured_header)
-        or request.headers.get("X-Weaver-User")
+        or request.headers.get("X-PuzzleResearch-User")
         or request.headers.get("x-user-id")
         or request.headers.get("user-id")
         or ""
@@ -10025,14 +10025,14 @@ async def browser_stream(
                 getattr(
                     settings,
                     "auth_user_header",
-                    "X-Weaver-User",
+                    "X-PuzzleResearch-User",
                 )
-                or "X-Weaver-User"
+                or "X-PuzzleResearch-User"
             ).strip()
         )
         principal_id = (
             websocket.headers.get(configured_header)
-            or websocket.headers.get("X-Weaver-User")
+            or websocket.headers.get("X-PuzzleResearch-User")
             or websocket.headers.get("x-user-id")
             or websocket.headers.get("user-id")
             or ""

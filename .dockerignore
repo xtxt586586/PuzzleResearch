@@ -15,7 +15,7 @@ htmlcov
 .env.*
 !.env.example
 
-weaver-reference
+*-reference
 data
 storage
 chroma

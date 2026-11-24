@@ -64,7 +64,7 @@ class ProfileRuntimeTests(unittest.TestCase):
             "deepseek-chat",
         )
 
-    def test_weaver_task_aliases_accept_task_specific_overrides(self):
+    def test_puzzleresearch_task_aliases_accept_task_specific_overrides(self):
         config = {
             "configurable": {
                 "query_gen_model": "deepseek-query-free",

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     internal_api_key: str = Field(
         default="",
-        description="WEAVER_INTERNAL_API_KEY",
+        description="PUZZLERESEARCH_INTERNAL_API_KEY",
     )
 
     # HTTP rate limiting is opt-in for local development and can be enabled
@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     auth_user_header: str = Field(
         default="X-Auth-User",
-        validation_alias="WEAVE_AUTH_USER_HEADER",
+        validation_alias="PUZZLERESEARCH_AUTH_USER_HEADER",
         description="可信用户身份请求头。",
     )
 

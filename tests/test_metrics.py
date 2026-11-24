@@ -13,9 +13,9 @@ class MetricsTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/plain", response.headers["content-type"])
-        self.assertIn("weaver_sse_active_connections", response.text)
-        self.assertIn("weaver_ws_active_connections", response.text)
-        self.assertIn("weaver_browser_ws_frames_total", response.text)
+        self.assertIn("puzzleresearch_sse_active_connections", response.text)
+        self.assertIn("puzzleresearch_ws_active_connections", response.text)
+        self.assertIn("puzzleresearch_browser_ws_frames_total", response.text)
 
     def test_prometheus_endpoint_does_not_require_api_key(self):
         with patch.object(main, "configured_api_key", "test-api-key"):

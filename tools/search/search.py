@@ -178,7 +178,7 @@ def enhanced_tavily_search(
 
 
 def tavily_search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[dict[str, Any]]:
-    """兼容 Weaver 旧调用方式，返回 Tavily 结果列表。"""
+    """兼容 PuzzleResearch 旧调用方式，返回 Tavily 结果列表。"""
 
     return enhanced_tavily_search(query, max_results=max_results)["results"]
 
